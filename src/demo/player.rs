@@ -100,6 +100,16 @@ pub struct PlayerAssets {
     #[dependency]
     pub ducky: Handle<Image>,
     #[dependency]
+    pub coin: Handle<Image>,
+    #[dependency]
+    pub dirt_patch: Handle<Image>,
+    #[dependency]
+    pub map: Handle<Image>,
+    #[dependency]
+    pub pond: Handle<Image>,
+    #[dependency]
+    pub trees: Handle<Image>,
+    #[dependency]
     pub bullet: Handle<Image>,
     #[dependency]
     pub steps: Vec<Handle<AudioSource>>,
@@ -108,6 +118,11 @@ pub struct PlayerAssets {
 impl PlayerAssets {
     pub const PATH_DUCKY: &'static str = "images/ducky.png";
     pub const PATH_BULLET: &'static str = "images/bullet.png";
+    pub const PATH_COIN: &'static str = "images/coin.png";
+    pub const PATH_DIRT_PATCH: &'static str = "images/dirt_patch.png";
+    pub const PATH_MAP: &'static str = "images/map.png";
+    pub const PATH_POND: &'static str = "images/pond.png";
+    pub const PATH_TREES: &'static str = "images/trees.png";
     pub const PATH_STEP_1: &'static str = "audio/sound_effects/step1.ogg";
     pub const PATH_STEP_2: &'static str = "audio/sound_effects/step2.ogg";
     pub const PATH_STEP_3: &'static str = "audio/sound_effects/step3.ogg";
@@ -126,6 +141,11 @@ impl FromWorld for PlayerAssets {
                 },
             ),
             bullet: assets.load(PlayerAssets::PATH_BULLET),
+            coin: assets.load(PlayerAssets::PATH_COIN),
+            dirt_patch: assets.load(PlayerAssets::PATH_DIRT_PATCH),
+            map: assets.load(PlayerAssets::PATH_MAP),
+            pond: assets.load(PlayerAssets::PATH_POND),
+            trees: assets.load(PlayerAssets::PATH_TREES),
             steps: vec![
                 assets.load(PlayerAssets::PATH_STEP_1),
                 assets.load(PlayerAssets::PATH_STEP_2),

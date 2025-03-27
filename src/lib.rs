@@ -3,7 +3,7 @@ pub mod audio;
 pub mod demo;
 #[cfg(feature = "dev")]
 mod dev_tools;
-mod screens;
+pub mod screens;
 mod theme;
 
 use std::time::Duration;
@@ -14,6 +14,8 @@ use bevy::{
     prelude::*,
 };
 use bevy_renet::renet::{ChannelConfig, ClientId, ConnectionConfig, SendType};
+use demo::player::PlayerAssets;
+use screens::Screen;
 use serde::{Deserialize, Serialize};
 
 pub struct AppPlugin;
@@ -28,7 +30,7 @@ impl Plugin for AppPlugin {
 
         // Spawn the main camera.
         app.add_systems(Startup, spawn_camera);
-
+        app.add_systems(OnEnter(Screen::Gameplay), spawn_map);
         // Add Bevy plugins.
         app.add_plugins(
             DefaultPlugins
@@ -96,5 +98,17 @@ fn spawn_camera(mut commands: Commands) {
         // [ui node outlines](https://bevyengine.org/news/bevy-0-14/#ui-node-outline-gizmos)
         // for debugging. So it's good to have this here for future-proofing.
         IsDefaultUiCamera,
+    ));
+}
+
+fn spawn_map(mut commands: Commands, player_assets: Res<PlayerAssets>) {
+    commands.spawn((
+        Name::new("Map"),
+        Sprite {
+            image: player_assets.map.clone(),
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(0., 0., 0.)).with_scale(Vec3::new(1.5, 1.5, 1.)),
+        StateScoped(Screen::Gameplay),
     ));
 }

@@ -17,11 +17,18 @@ use chexy_butt_balloons::{
             ServerChannel, ServerMessages, Velocity, PROTOCOL_ID,
         },
         movement::{apply_movement, apply_screen_wrap, MovementController},
+        physics::{check_collision, Collider},
+        player::PlayerAssets,
     },
+    screens::Screen,
     AppSet,
 };
 
+use rand::Rng;
 use renet_visualizer::RenetServerVisualizer;
+
+#[derive(Component)]
+pub struct ServerGameObject(pub u64);
 
 #[derive(Debug, Default, Resource)]
 pub struct ServerLobby {
@@ -30,6 +37,16 @@ pub struct ServerLobby {
 
 const PLAYER_MOVE_SPEED: f32 = 300.0;
 const PROJECTILE_MOVE_SPEED: f32 = 350.0;
+const SPAWN_POSITIONS: [Vec3; 8] = [
+    Vec3::new(-250., 0., 2.),
+    Vec3::new(250., 0., 2.),
+    Vec3::new(0., 250., 2.),
+    Vec3::new(0., -250., 2.),
+    Vec3::new(176., 176., 2.),
+    Vec3::new(-176., 176., 2.),
+    Vec3::new(-176., -176., 2.),
+    Vec3::new(176., -176., 2.),
+];
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 #[reflect(Component)]
@@ -117,7 +134,7 @@ fn main() {
 
     app.add_plugins(RenetServerPlugin);
     app.add_plugins(FrameTimeDiagnosticsPlugin);
-    // app.add_plugins(LogDiagnosticsPlugin::default());
+    app.add_plugins(LogDiagnosticsPlugin::default());
     app.add_plugins(EguiPlugin);
 
     app.insert_resource(ServerLobby::default());
@@ -149,7 +166,8 @@ fn main() {
             .in_set(AppSet::Update),
     );
 
-    app.add_systems(FixedUpdate, move_projectiles);
+    // app.add_systems(FixedUpdate, move_projectiles);
+    app.add_systems(Startup, generate_world);
 
     app.add_systems(PostUpdate, projectile_on_removal_system);
 
@@ -168,6 +186,7 @@ fn server_update_system(
     mut server: ResMut<RenetServer>,
     mut visualizer: ResMut<RenetServerVisualizer<200>>,
     players: Query<(Entity, &Player, &Transform, &MovementController)>,
+    game_objects: Query<(&Transform, &ServerGameObject)>,
 ) {
     for event in server_events.read() {
         match event {
@@ -187,20 +206,33 @@ fn server_update_system(
                     server.send_message(*client_id, ServerChannel::ServerMessages, message);
                 }
 
+                // Initialize game objects for this player
+                for (transform, id) in game_objects.iter() {
+                    let translation: [f32; 3] = transform.translation.into();
+                    let message = bincode::serialize(&ServerMessages::SpawnGameObject {
+                        id: id.0,
+                        translation,
+                    })
+                    .unwrap();
+                    server.send_message(*client_id, ServerChannel::ServerMessages, message);
+                }
                 // Spawn new player
-                let transform = Transform::from_xyz(
-                    (fastrand::f32() - 0.5) * 40.,
-                    0.51,
-                    (fastrand::f32() - 0.5) * 40.,
+                let transform = Transform::from_translation(
+                    SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()],
                 );
                 let player_entity = commands
                     .spawn((
-                        Transform::from_scale(Vec2::splat(2.0).extend(1.0)),
+                        transform,
                         MovementController {
                             max_speed: PLAYER_MOVE_SPEED,
                             ..default()
                         },
                     ))
+                    .insert(Collider {
+                        size: Vec2::new(14., 24.),
+                        collides_with_player: true,
+                        collides_with_projectile: true,
+                    })
                     .insert(PlayerInput::default())
                     .insert(Velocity::default())
                     .insert(Player { id: *client_id })
@@ -254,7 +286,7 @@ fn server_update_system(
                             let spawn_position = player_transform.translation.xy() + offset;
 
                             let final_translation = player_transform
-                                .with_translation(spawn_position.extend(0.))
+                                .with_translation(spawn_position.extend(10.))
                                 .translation;
 
                             let projectile_entity = commands
@@ -264,6 +296,11 @@ fn server_update_system(
                                     Transform::from_translation(final_translation)
                                         .with_rotation(Quat::from_rotation_z(angle)),
                                 ))
+                                .insert(Collider {
+                                    size: Vec2::new(12., 18.),
+                                    collides_with_player: true,
+                                    collides_with_projectile: true,
+                                })
                                 .insert(FacingDirection(player_dir))
                                 .insert(Projectile {
                                     speed: PROJECTILE_MOVE_SPEED,
@@ -286,6 +323,7 @@ fn server_update_system(
             let input: PlayerInput = bincode::deserialize(&message).unwrap();
 
             if let Some(player_entity) = lobby.players.get(&client_id) {
+                // println!("INPUT! {:?}", input);
                 commands.entity(*player_entity).insert(input);
             }
         }
@@ -341,10 +379,32 @@ fn move_players_system(
     }
 }
 
-fn move_projectiles(time: Res<Time>, mut query: Query<(&Projectile, &mut Transform)>) {
-    for (projectile, mut transform) in &mut query {
-        transform.translation +=
+fn move_projectiles(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &Projectile, &mut Transform, &Collider), With<Projectile>>,
+    colliders: Query<(&Transform, &Collider), Without<Projectile>>,
+) {
+    for (e, projectile, mut proj_transform, proj_collider) in &mut query {
+        let movement_this_frame =
             projectile.direction.extend(0.0) * projectile.speed * time.delta_secs();
+        for (collider_transform, collider) in &colliders {
+            //use check_collision
+
+            if collider.collides_with_player
+                && check_collision(
+                    &(proj_transform.translation + movement_this_frame),
+                    proj_collider,
+                    &collider_transform.translation,
+                    collider,
+                )
+            {
+                // If we're colliding, don't move.
+                commands.entity(e).despawn();
+                return;
+            }
+        }
+        proj_transform.translation += movement_this_frame
     }
 }
 
@@ -384,7 +444,7 @@ fn spawn_bot(
         let transform = Transform::from_xyz(
             (fastrand::f32() - 0.5) * 300.,
             (fastrand::f32() - 0.5) * 600.,
-            0.,
+            8.,
         );
         let player_entity = commands
             .spawn((
@@ -450,5 +510,66 @@ fn bot_autocast(
         };
         let message = bincode::serialize(&message).unwrap();
         server.broadcast_message(ServerChannel::ServerMessages, message);
+    }
+}
+
+fn generate_world(mut commands: Commands) {
+    let obj_collider_sizes = [Vec2::new(0., 0.), Vec2::new(90., 76.), Vec2::new(26., 30.)];
+    let dirt_patches = [
+        Vec3::new(-250., 0., 2.),
+        Vec3::new(250., 0., 2.),
+        Vec3::new(0., 250., 2.),
+        Vec3::new(0., -250., 2.),
+        Vec3::new(176., 176., 2.),
+        Vec3::new(-176., 176., 2.),
+        Vec3::new(-176., -176., 2.),
+        Vec3::new(176., -176., 2.),
+    ];
+    for i in 0..8 {
+        commands.spawn((
+            Name::new("Game Object"),
+            Transform::from_translation(dirt_patches[i]).with_scale(Vec3::new(1.5, 1.5, 1.)),
+            StateScoped(Screen::Gameplay),
+            ServerGameObject(0),
+        ));
+    }
+
+    commands.spawn((
+        Name::new("Pond"),
+        Transform::from_translation(Vec2::ZERO.extend(2.)).with_scale(Vec3::new(1.5, 1.5, 1.)),
+        StateScoped(Screen::Gameplay),
+        Collider {
+            size: obj_collider_sizes[1],
+            collides_with_player: true,
+            collides_with_projectile: false,
+        },
+        ServerGameObject(1),
+    ));
+
+    let num_trees = fastrand::usize(16..=24);
+
+    for _ in 0..num_trees {
+        let mut rng = rand::thread_rng();
+
+        // Generate a random angle between 0 and 2*pi
+        let angle = rng.gen_range(0.0..std::f32::consts::PI * 2.0);
+
+        // Generate a random distance greater than the minimum radius (e.g., 250)
+        let distance = rng.gen_range(270.0..800.0); // You can adjust the upper bound here
+
+        // Convert polar coordinates to Cartesian coordinates (x, y)
+        let x = distance * angle.cos();
+        let y = distance * angle.sin();
+        commands.spawn((
+            Name::new("Tree"),
+            Transform::from_translation(Vec3::new(x, y, 2.)).with_scale(Vec3::new(1.5, 1.5, 1.)),
+            StateScoped(Screen::Gameplay),
+            Collider {
+                size: obj_collider_sizes[2],
+                collides_with_player: true,
+                collides_with_projectile: true,
+            },
+            ServerGameObject(2),
+        ));
     }
 }

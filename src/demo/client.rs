@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::demo::animation::{FacingDirection, PlayerAnimation};
 
 use crate::demo::lib::connection_config;
+use crate::demo::physics::Collider;
 use crate::screens::Screen;
 use bevy::window::PrimaryWindow;
 use bevy::{
@@ -134,7 +135,7 @@ fn add_steam_network(app: &mut App) {
 pub(super) fn plugins(app: &mut App) {
     app.add_plugins(RenetClientPlugin);
     app.add_plugins(FrameTimeDiagnosticsPlugin);
-    // app.add_plugins(LogDiagnosticsPlugin::default());
+    app.add_plugins(LogDiagnosticsPlugin::default());
     app.add_plugins(EguiPlugin);
 
     // #[cfg(feature = "netcode")]
@@ -260,6 +261,11 @@ pub fn client_sync_players(
                         }),
                         ..default()
                     },
+                    Collider {
+                        size: Vec2::new(14., 24.),
+                        collides_with_player: true,
+                        collides_with_projectile: true,
+                    },
                     FacingDirection(Vec2::new(0.0, 1.0)),
                     Transform::from_translation(Vec3::from_array(translation)),
                     player_animation,
@@ -288,6 +294,31 @@ pub fn client_sync_players(
                     network_mapping.0.remove(&server_entity);
                 }
             }
+            ServerMessages::SpawnGameObject { id, translation } => {
+                println!("Object {} spawned at {:?}.", id, translation);
+                let obj_collider_sizes =
+                    [Vec2::new(0., 0.), Vec2::new(90., 76.), Vec2::new(26., 30.)];
+                commands.spawn((
+                    Name::new("Dirt"),
+                    Sprite {
+                        image: match id {
+                            0 => player_assets.dirt_patch.clone(),
+                            1 => player_assets.pond.clone(),
+                            2 => player_assets.trees.clone(),
+                            _ => unreachable!(),
+                        },
+                        ..default()
+                    },
+                    Collider {
+                        size: obj_collider_sizes[id as usize],
+                        collides_with_player: id != 0,
+                        collides_with_projectile: id == 2,
+                    },
+                    Transform::from_translation(Vec3::from_array(translation))
+                        .with_scale(Vec3::new(1.5, 1.5, 1.)),
+                    StateScoped(Screen::Gameplay),
+                ));
+            }
             ServerMessages::SpawnProjectile {
                 entity,
                 translation,
@@ -298,6 +329,11 @@ pub fn client_sync_players(
                         image: player_assets.bullet.clone(),
                         custom_size: Some(Vec2::new(12., 18.)),
                         ..default()
+                    },
+                    Collider {
+                        size: Vec2::new(12., 18.),
+                        collides_with_player: true,
+                        collides_with_projectile: true,
                     },
                     Transform::from_translation(translation.into())
                         .with_rotation(Quat::from_rotation_z(angle)),
@@ -328,68 +364,6 @@ pub fn client_sync_players(
                     commands.entity(*entity).insert(FacingDirection(direction));
                 }
             }
-        }
-    }
-}
-
-#[derive(Component)]
-struct Target;
-
-fn update_target_system(
-    primary_window: Query<&Window, With<PrimaryWindow>>,
-    mut target_query: Query<&mut Transform, With<Target>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-) {
-    let (camera, camera_transform) = camera_query.single();
-    let mut target_transform = target_query.single_mut();
-    if let Some(cursor_pos) = primary_window.single().cursor_position() {
-        if let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) {
-            if let Some(distance) = ray.intersect_plane(Vec3::Y, InfinitePlane3d::new(Vec3::Y)) {
-                target_transform.translation = ray.direction * distance + ray.origin;
-            }
-        }
-    }
-}
-
-fn setup_camera(mut commands: Commands) {
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0., 8.0, 2.5).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
-    ));
-}
-
-fn setup_target(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands
-        .spawn((
-            Mesh3d(meshes.add(Mesh::from(Sphere::new(0.1)))),
-            MeshMaterial3d(materials.add(Color::srgb(1.0, 0.0, 0.0))),
-            Transform::from_xyz(0.0, 0., 0.0),
-        ))
-        .insert(Target);
-}
-
-fn camera_follow(
-    time: Res<Time>,
-    mut camera_query: Query<&mut Transform, (With<Camera>, Without<ControlledPlayer>)>,
-    player_query: Query<&Transform, With<ControlledPlayer>>,
-) {
-    let mut cam_transform = camera_query.single_mut();
-    if let Ok(player_transform) = player_query.get_single() {
-        let eye = Vec3::new(
-            player_transform.translation.x,
-            8.,
-            player_transform.translation.z + 2.5,
-        );
-        if eye.distance(cam_transform.translation) > 10.0 {
-            cam_transform.translation = eye;
-        } else {
-            cam_transform
-                .translation
-                .smooth_nudge(&eye, 8.0, time.delta_secs());
         }
     }
 }

@@ -45,6 +45,10 @@ pub enum ServerMessages {
         id: ClientId,
         translation: [f32; 3],
     },
+    SpawnGameObject {
+        id: ClientId,
+        translation: [f32; 3],
+    },
     PlayerRemove {
         id: ClientId,
     },

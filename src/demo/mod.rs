@@ -10,11 +10,13 @@ mod client;
 pub mod level;
 pub mod lib;
 pub mod movement;
+pub mod physics;
 pub mod player;
 pub mod projectile;
 
 pub(super) fn plugin(app: &mut App) {
     app.add_plugins((
+        physics::plugin,
         movement::plugin,
         client::plugins,
         animation::plugin,
