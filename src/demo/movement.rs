@@ -17,7 +17,11 @@ use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::AppSet;
 
-use super::physics::{check_collision, Collider};
+use super::{
+    lib::Player,
+    physics::{check_collision, Collider},
+    player::Coin,
+};
 
 pub fn plugin(app: &mut App) {
     app.register_type::<(MovementController, ScreenWrap)>();
@@ -56,43 +60,54 @@ impl Default for MovementController {
 }
 
 pub fn apply_movement(
+    mut commands: Commands,
     time: Res<Time>,
-    mut movement_query: Query<(Entity, &mut Transform, &MovementController)>,
-    // mut colliders: Query<(&mut Transform, &Collider)>,
+    mut movement_query: Query<(Entity, &MovementController)>,
+    mut player_data: Query<&mut Player>,
+    mut colliders: Query<(Entity, &mut Transform, &Collider, Option<&Coin>)>,
 ) {
-    // let mut movement_data: Vec<_> = vec![];
-    // for (entity, controller) in &mut movement_query {
-    //     let velocity = controller.max_speed * controller.intent;
-    //     let movement_this_frame = velocity.extend(0.0) * time.delta_secs();
-    //     let (t, c) = colliders.get(entity).unwrap();
-    //     movement_data.push((entity, t.clone(), c.clone(), movement_this_frame));
-    //     // println!("num movers: {:?}", movement_data.len());
-    // }
-
-    // 'outer: for (entity, mover_transform, mover_collider, movement_this_frame) in movement_data {
-    //     // for (collider_transform, collider) in colliders.iter_mut() {
-    //     //     println!("CHECK");
-    //     //     if collider.collides_with_player
-    //     //         && check_collision(
-    //     //             &(mover_transform.translation + movement_this_frame),
-    //     //             &mover_collider,
-    //     //             &collider_transform.translation,
-    //     //             collider,
-    //     //         )
-    //     //     {
-    //     //         // If we're colliding, don't move.
-    //     //         continue 'outer;
-    //     //     }
-    //     // }
-    //     // println!("MOVE");
-    //     let mut transform = colliders.get_mut(entity).unwrap().0;
-    //     transform.translation += movement_this_frame;
-    // }
-    for (entity, mut transform, controller) in movement_query.iter_mut() {
+    let mut movement_data: Vec<_> = vec![];
+    for (entity, controller) in &mut movement_query {
         let velocity = controller.max_speed * controller.intent;
         let movement_this_frame = velocity.extend(0.0) * time.delta_secs();
+        let (_, t, c, _) = colliders.get(entity).unwrap();
+        movement_data.push((entity, t.clone(), c.clone(), movement_this_frame));
+        // println!("num movers: {:?}", movement_data.len());
+    }
+
+    'outer: for (entity, mover_transform, mover_collider, movement_this_frame) in movement_data {
+        for (collider_entity, collider_transform, collider, maybe_coin) in colliders.iter_mut() {
+            if collider_entity == entity {
+                // Don't check collision with self.
+                continue;
+            }
+            if collider.collides_with_player
+                && check_collision(
+                    &(mover_transform.translation + movement_this_frame),
+                    &mover_collider,
+                    &collider_transform.translation,
+                    collider,
+                )
+            {
+                // check if its a coin
+                if maybe_coin.is_some() {
+                    let mut score = player_data.get_mut(entity).unwrap();
+                    score.score += 1;
+                    commands.entity(collider_entity).despawn();
+                } else {
+                    // If we're colliding, don't move.
+                    continue 'outer;
+                }
+            }
+        }
+        let mut transform = colliders.get_mut(entity).unwrap().1;
         transform.translation += movement_this_frame;
     }
+    // for (entity, controller) in movement_query.iter_mut() {
+    //     let velocity = controller.max_speed * controller.intent;
+    //     let movement_this_frame = velocity.extend(0.0) * time.delta_secs();
+    //     transform.translation += movement_this_frame;
+    // }
 }
 
 #[derive(Component, Reflect)]

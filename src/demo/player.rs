@@ -23,6 +23,12 @@ pub(super) fn plugin(app: &mut App) {
     // );
 }
 
+#[derive(Component, Debug, Reflect)]
+#[reflect(Component)]
+pub struct Coin {
+    pub claimed_by: Option<Entity>,
+}
+
 /// A command to spawn the player character.
 #[derive(Debug)]
 pub struct SpawnPlayer {
@@ -112,12 +118,24 @@ pub struct PlayerAssets {
     #[dependency]
     pub bullet: Handle<Image>,
     #[dependency]
+    pub wall_h_small: Handle<Image>,
+    #[dependency]
+    pub wall_h_large: Handle<Image>,
+    #[dependency]
+    pub wall_v_small: Handle<Image>,
+    #[dependency]
+    pub wall_v_large: Handle<Image>,
+    #[dependency]
     pub steps: Vec<Handle<AudioSource>>,
 }
 
 impl PlayerAssets {
     pub const PATH_DUCKY: &'static str = "images/ducky.png";
     pub const PATH_BULLET: &'static str = "images/bullet.png";
+    pub const PATH_WALL_H_SMALL: &'static str = "images/wall_h_small.png";
+    pub const PATH_WALL_V_SMALL: &'static str = "images/wall_v_small.png";
+    pub const PATH_WALL_V_LARGE: &'static str = "images/wall_v_large.png";
+    pub const PATH_WALL_H_LARGE: &'static str = "images/wall_h_large.png";
     pub const PATH_COIN: &'static str = "images/coin.png";
     pub const PATH_DIRT_PATCH: &'static str = "images/dirt_patch.png";
     pub const PATH_MAP: &'static str = "images/map.png";
@@ -140,6 +158,10 @@ impl FromWorld for PlayerAssets {
                     settings.sampler = ImageSampler::nearest();
                 },
             ),
+            wall_h_small: assets.load(PlayerAssets::PATH_WALL_H_SMALL),
+            wall_h_large: assets.load(PlayerAssets::PATH_WALL_H_LARGE),
+            wall_v_small: assets.load(PlayerAssets::PATH_WALL_V_SMALL),
+            wall_v_large: assets.load(PlayerAssets::PATH_WALL_V_LARGE),
             bullet: assets.load(PlayerAssets::PATH_BULLET),
             coin: assets.load(PlayerAssets::PATH_COIN),
             dirt_patch: assets.load(PlayerAssets::PATH_DIRT_PATCH),

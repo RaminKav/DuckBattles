@@ -14,6 +14,13 @@ pub const PRIVATE_KEY: &[u8; bevy_renet::netcode::NETCODE_KEY_BYTES] =
                                          // #[cfg(feature = "netcode")]
 pub const PROTOCOL_ID: u64 = 7;
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[reflect(Component)]
+pub struct Player {
+    pub id: ClientId,
+    pub score: u64,
+}
+
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, Component, Resource)]
 pub struct PlayerInput {
     pub up: bool,
@@ -57,7 +64,11 @@ pub enum ServerMessages {
         translation: [f32; 3],
         angle: f32,
     },
-    DespawnProjectile {
+    SpawnCoin {
+        entity: Entity,
+        translation: [f32; 3],
+    },
+    DespawnEntity {
         entity: Entity,
     },
 }
@@ -67,6 +78,7 @@ pub struct NetworkedEntities {
     pub entities: Vec<Entity>,
     pub translations: Vec<[f32; 3]>,
     pub facing_directions: Vec<Option<[f32; 2]>>,
+    pub score: Option<u64>,
 }
 
 impl From<ClientChannel> for u8 {

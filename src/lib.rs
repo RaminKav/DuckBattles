@@ -12,6 +12,7 @@ use bevy::{
     asset::AssetMetaCheck,
     audio::{AudioPlugin, Volume},
     prelude::*,
+    window::WindowMode,
 };
 use bevy_renet::renet::{ChannelConfig, ClientId, ConnectionConfig, SendType};
 use demo::player::PlayerAssets;
@@ -45,6 +46,7 @@ impl Plugin for AppPlugin {
                     primary_window: Window {
                         title: "Chexy Butt Balloons".to_string(),
                         // canvas: Some("#bevy".to_string()),
+                        mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
                         fit_canvas_to_parent: true,
                         prevent_default_event_handling: true,
                         ..default()

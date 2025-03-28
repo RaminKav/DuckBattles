@@ -4,8 +4,8 @@ use crate::demo::animation::{FacingDirection, PlayerAnimation};
 
 use crate::demo::lib::connection_config;
 use crate::demo::physics::Collider;
+use crate::screens::gameplay::ScoreText;
 use crate::screens::Screen;
-use bevy::window::PrimaryWindow;
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::Vec3,
@@ -20,7 +20,8 @@ use bevy_renet::{
 use renet_visualizer::{RenetClientVisualizer, RenetVisualizerStyle};
 
 use super::lib::{
-    ClientChannel, NetworkedEntities, PlayerCommand, PlayerInput, ServerChannel, ServerMessages,
+    ClientChannel, NetworkedEntities, Player, PlayerCommand, PlayerInput, ServerChannel,
+    ServerMessages,
 };
 use super::player::PlayerAssets;
 
@@ -155,6 +156,7 @@ pub(super) fn plugins(app: &mut App) {
         Update,
         (
             client_send_input,
+            update_score_text,
             client_send_player_commands,
             client_sync_players,
         )
@@ -230,6 +232,7 @@ pub fn client_sync_players(
     mut network_mapping: ResMut<NetworkMapping>,
     player_assets: Res<PlayerAssets>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mut player_data: Query<&mut Player>,
 ) {
     let client_id = client_id.0;
     while let Some(message) = client.receive_message(ServerChannel::ServerMessages) {
@@ -253,6 +256,7 @@ pub fn client_sync_players(
 
                 let mut client_entity = commands.spawn((
                     Name::new("Player"),
+                    Player { id, score: 0 },
                     Sprite {
                         image: player_assets.ducky.clone(),
                         texture_atlas: Some(TextureAtlas {
@@ -296,8 +300,15 @@ pub fn client_sync_players(
             }
             ServerMessages::SpawnGameObject { id, translation } => {
                 println!("Object {} spawned at {:?}.", id, translation);
-                let obj_collider_sizes =
-                    [Vec2::new(0., 0.), Vec2::new(90., 76.), Vec2::new(26., 30.)];
+                let obj_collider_sizes = [
+                    Vec2::new(0., 0.),
+                    Vec2::new(90., 76.),
+                    Vec2::new(26., 30.),
+                    Vec2::new(64., 48.),
+                    Vec2::new(94., 48.),
+                    Vec2::new(32., 80.),
+                    Vec2::new(32., 114.),
+                ];
                 commands.spawn((
                     Name::new("Dirt"),
                     Sprite {
@@ -305,14 +316,18 @@ pub fn client_sync_players(
                             0 => player_assets.dirt_patch.clone(),
                             1 => player_assets.pond.clone(),
                             2 => player_assets.trees.clone(),
+                            3 => player_assets.wall_h_small.clone(),
+                            4 => player_assets.wall_h_large.clone(),
+                            5 => player_assets.wall_v_small.clone(),
+                            6 => player_assets.wall_v_large.clone(),
                             _ => unreachable!(),
                         },
                         ..default()
                     },
                     Collider {
-                        size: obj_collider_sizes[id as usize],
+                        size: obj_collider_sizes[id as usize] * 1.5,
                         collides_with_player: id != 0,
-                        collides_with_projectile: id == 2,
+                        collides_with_projectile: id >= 2,
                     },
                     Transform::from_translation(Vec3::from_array(translation))
                         .with_scale(Vec3::new(1.5, 1.5, 1.)),
@@ -341,7 +356,27 @@ pub fn client_sync_players(
 
                 network_mapping.0.insert(entity, projectile_entity.id());
             }
-            ServerMessages::DespawnProjectile { entity } => {
+            ServerMessages::SpawnCoin {
+                entity,
+                translation,
+            } => {
+                let coin_entity = commands.spawn((
+                    Sprite {
+                        image: player_assets.coin.clone(),
+                        ..default()
+                    },
+                    Collider {
+                        size: Vec2::new(20., 24.),
+                        collides_with_player: true,
+                        collides_with_projectile: false,
+                    },
+                    Transform::from_translation(translation.into())
+                        .with_scale(Vec3::new(1.5, 1.5, 1.)),
+                ));
+
+                network_mapping.0.insert(entity, coin_entity.id());
+            }
+            ServerMessages::DespawnEntity { entity } => {
                 if let Some(entity) = network_mapping.0.remove(&entity) {
                     commands.entity(entity).despawn();
                 }
@@ -363,7 +398,23 @@ pub fn client_sync_players(
                 if let Some(direction) = maybe_direction {
                     commands.entity(*entity).insert(FacingDirection(direction));
                 }
+                if let Some(score) = networked_entities.score {
+                    if let Ok(mut player) = player_data.get_mut(*entity) {
+                        player.score = score;
+                    }
+                }
             }
         }
+    }
+}
+
+fn update_score_text(
+    mut score_text_query: Query<&mut Text, With<ScoreText>>,
+    player_data: Query<&Player, With<ControlledPlayer>>,
+) {
+    for mut text in &mut score_text_query {
+        let player = player_data.single();
+
+        text.0 = format!("Coins: {}", player.score);
     }
 }

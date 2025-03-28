@@ -2,6 +2,8 @@
 
 use bevy::{input::common_conditions::input_just_pressed, prelude::*};
 
+use crate::theme::widgets::Containers;
+use crate::theme::widgets::Widgets;
 use crate::{
     asset_tracking::LoadResource, audio::Music, demo::level::spawn_level as spawn_level_command,
     screens::Screen,
@@ -11,7 +13,10 @@ pub(super) fn plugin(app: &mut App) {
     app.add_systems(OnEnter(Screen::Gameplay), spawn_level);
 
     app.load_resource::<GameplayMusic>();
-    app.add_systems(OnEnter(Screen::Gameplay), play_gameplay_music);
+    app.add_systems(
+        OnEnter(Screen::Gameplay),
+        (play_gameplay_music, spawn_score_text),
+    );
     app.add_systems(OnExit(Screen::Gameplay), stop_music);
 
     app.add_systems(
@@ -62,4 +67,22 @@ fn stop_music(mut commands: Commands, mut music: ResMut<GameplayMusic>) {
 
 fn return_to_title_screen(mut next_screen: ResMut<NextState<Screen>>) {
     next_screen.set(Screen::Title);
+}
+
+#[derive(Component)]
+pub struct ScoreText;
+
+fn spawn_score_text(mut commands: Commands) {
+    commands
+        .ui_root()
+        .insert(StateScoped(Screen::Gameplay))
+        .with_children(|children| {
+            children.label("Coins: 0").insert(ScoreText).insert(Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(10.0),
+                top: Val::Px(10.0),
+
+                ..default()
+            });
+        });
 }

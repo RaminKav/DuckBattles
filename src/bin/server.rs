@@ -13,12 +13,12 @@ use chexy_butt_balloons::{
     demo::{
         animation::FacingDirection,
         lib::{
-            connection_config, ClientChannel, NetworkedEntities, PlayerCommand, PlayerInput,
-            ServerChannel, ServerMessages, Velocity, PROTOCOL_ID,
+            connection_config, ClientChannel, NetworkedEntities, Player, PlayerCommand,
+            PlayerInput, ServerChannel, ServerMessages, Velocity, PROTOCOL_ID,
         },
         movement::{apply_movement, apply_screen_wrap, MovementController},
         physics::{check_collision, Collider},
-        player::PlayerAssets,
+        player::{Coin, PlayerAssets},
     },
     screens::Screen,
     AppSet,
@@ -34,25 +34,23 @@ pub struct ServerGameObject(pub u64);
 pub struct ServerLobby {
     pub players: HashMap<ClientId, Entity>,
 }
+#[derive(Debug, Default, Resource)]
+pub struct CoinSpawner {
+    pub timer: Timer,
+}
 
 const PLAYER_MOVE_SPEED: f32 = 300.0;
-const PROJECTILE_MOVE_SPEED: f32 = 350.0;
-const SPAWN_POSITIONS: [Vec3; 8] = [
-    Vec3::new(-250., 0., 2.),
-    Vec3::new(250., 0., 2.),
-    Vec3::new(0., 250., 2.),
-    Vec3::new(0., -250., 2.),
-    Vec3::new(176., 176., 2.),
-    Vec3::new(-176., 176., 2.),
-    Vec3::new(-176., -176., 2.),
-    Vec3::new(176., -176., 2.),
+const PROJECTILE_MOVE_SPEED: f32 = 500.0;
+const SPAWN_POSITIONS: [Vec2; 8] = [
+    Vec2::new(-250., 0.),
+    Vec2::new(250., 0.),
+    Vec2::new(0., 250.),
+    Vec2::new(0., -250.),
+    Vec2::new(176., 176.),
+    Vec2::new(-176., 176.),
+    Vec2::new(-176., -176.),
+    Vec2::new(176., -176.),
 ];
-
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
-#[reflect(Component)]
-pub struct Player {
-    pub id: ClientId,
-}
 
 #[derive(Debug, Component)]
 struct Bot {
@@ -139,6 +137,9 @@ fn main() {
 
     app.insert_resource(ServerLobby::default());
     app.insert_resource(BotId(0));
+    app.insert_resource(CoinSpawner {
+        timer: Timer::from_seconds(1.2, TimerMode::Repeating),
+    });
 
     app.insert_resource(RenetServerVisualizer::<200>::default());
 
@@ -166,10 +167,13 @@ fn main() {
             .in_set(AppSet::Update),
     );
 
-    // app.add_systems(FixedUpdate, move_projectiles);
+    app.add_systems(FixedUpdate, (move_projectiles, spawn_coins));
     app.add_systems(Startup, generate_world);
 
-    app.add_systems(PostUpdate, projectile_on_removal_system);
+    app.add_systems(
+        PostUpdate,
+        (projectile_on_removal_system, coin_on_removal_system),
+    );
 
     // app.add_systems(Startup, setup_simple_camera);
 
@@ -218,7 +222,7 @@ fn server_update_system(
                 }
                 // Spawn new player
                 let transform = Transform::from_translation(
-                    SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()],
+                    SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()].extend(8.),
                 );
                 let player_entity = commands
                     .spawn((
@@ -235,7 +239,10 @@ fn server_update_system(
                     })
                     .insert(PlayerInput::default())
                     .insert(Velocity::default())
-                    .insert(Player { id: *client_id })
+                    .insert(Player {
+                        id: *client_id,
+                        score: 0,
+                    })
                     .id();
 
                 lobby.players.insert(*client_id, player_entity);
@@ -281,7 +288,7 @@ fn server_update_system(
                             let angle =
                                 player_dir.y.atan2(player_dir.x) - std::f32::consts::PI / 2.0;
 
-                            let offset_distance = 50.0; // How far in front of the player to spawn the projectile
+                            let offset_distance = 20.0; // How far in front of the player to spawn the projectile
                             let offset = player_dir * offset_distance;
                             let spawn_position = player_transform.translation.xy() + offset;
 
@@ -343,16 +350,24 @@ fn update_visulizer_system(
 fn server_network_sync(
     mut server: ResMut<RenetServer>,
     query: Query<
-        (Entity, &Transform, Option<&FacingDirection>),
+        (
+            Entity,
+            &Transform,
+            Option<&FacingDirection>,
+            Option<&Player>,
+        ),
         Or<(With<Player>, With<Projectile>)>,
     >,
 ) {
     let mut networked_entities = NetworkedEntities::default();
-    for (entity, transform, maybe_direction) in query.iter() {
+    for (entity, transform, maybe_direction, maybe_player) in query.iter() {
         networked_entities.entities.push(entity);
         networked_entities
             .translations
             .push(transform.translation.into());
+
+        networked_entities.score = maybe_player.map(|player| player.score);
+
         networked_entities.facing_directions.push(
             maybe_direction
                 .map(|direction| Some([direction.0.x, direction.0.y]))
@@ -391,7 +406,7 @@ fn move_projectiles(
         for (collider_transform, collider) in &colliders {
             //use check_collision
 
-            if collider.collides_with_player
+            if collider.collides_with_projectile
                 && check_collision(
                     &(proj_transform.translation + movement_this_frame),
                     proj_collider,
@@ -421,7 +436,19 @@ fn projectile_on_removal_system(
     mut removed_projectiles: RemovedComponents<Projectile>,
 ) {
     for entity in removed_projectiles.read() {
-        let message = ServerMessages::DespawnProjectile { entity };
+        let message = ServerMessages::DespawnEntity { entity };
+        let message = bincode::serialize(&message).unwrap();
+
+        server.broadcast_message(ServerChannel::ServerMessages, message);
+    }
+}
+
+fn coin_on_removal_system(
+    mut server: ResMut<RenetServer>,
+    mut removed_coins: RemovedComponents<Coin>,
+) {
+    for entity in removed_coins.read() {
+        let message = ServerMessages::DespawnEntity { entity };
         let message = bincode::serialize(&message).unwrap();
 
         server.broadcast_message(ServerChannel::ServerMessages, message);
@@ -441,10 +468,9 @@ fn spawn_bot(
         let client_id: ClientId = bot_id.0;
         bot_id.0 += 1;
         // Spawn new player
-        let transform = Transform::from_xyz(
-            (fastrand::f32() - 0.5) * 300.,
-            (fastrand::f32() - 0.5) * 600.,
-            8.,
+
+        let transform = Transform::from_translation(
+            SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()].extend(8.),
         );
         let player_entity = commands
             .spawn((
@@ -452,7 +478,10 @@ fn spawn_bot(
                 MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
                 transform,
             ))
-            .insert(Player { id: client_id })
+            .insert(Player {
+                id: client_id,
+                score: 0,
+            })
             .insert(Bot {
                 auto_cast: Timer::from_seconds(3.0, TimerMode::Repeating),
             })
@@ -491,7 +520,7 @@ fn bot_autocast(
         let spawn_position = transform.translation.xy() + offset;
 
         let final_translation = transform
-            .with_translation(spawn_position.extend(0.))
+            .with_translation(spawn_position.extend(8.))
             .translation;
 
         let projectile_entity = commands
@@ -500,6 +529,11 @@ fn bot_autocast(
             .insert(Projectile {
                 speed: PROJECTILE_MOVE_SPEED,
                 direction: bot_dir,
+            })
+            .insert(Collider {
+                size: Vec2::new(12., 18.),
+                collides_with_player: true,
+                collides_with_projectile: true,
             })
             .insert(FacingDirection(bot_dir))
             .id();
@@ -514,7 +548,7 @@ fn bot_autocast(
 }
 
 fn generate_world(mut commands: Commands) {
-    let obj_collider_sizes = [Vec2::new(0., 0.), Vec2::new(90., 76.), Vec2::new(26., 30.)];
+    let obj_collider_sizes = [Vec2::new(0., 0.), Vec2::new(110., 80.), Vec2::new(26., 30.)];
     let dirt_patches = [
         Vec3::new(-250., 0., 2.),
         Vec3::new(250., 0., 2.),
@@ -546,7 +580,7 @@ fn generate_world(mut commands: Commands) {
         ServerGameObject(1),
     ));
 
-    let num_trees = fastrand::usize(16..=24);
+    let num_trees = fastrand::usize(12..=20);
 
     for _ in 0..num_trees {
         let mut rng = rand::thread_rng();
@@ -555,14 +589,14 @@ fn generate_world(mut commands: Commands) {
         let angle = rng.gen_range(0.0..std::f32::consts::PI * 2.0);
 
         // Generate a random distance greater than the minimum radius (e.g., 250)
-        let distance = rng.gen_range(270.0..800.0); // You can adjust the upper bound here
+        let distance = rng.gen_range(270.0..500.0); // You can adjust the upper bound here
 
         // Convert polar coordinates to Cartesian coordinates (x, y)
         let x = distance * angle.cos();
         let y = distance * angle.sin();
         commands.spawn((
             Name::new("Tree"),
-            Transform::from_translation(Vec3::new(x, y, 2.)).with_scale(Vec3::new(1.5, 1.5, 1.)),
+            Transform::from_translation(Vec3::new(x, y, 3.)).with_scale(Vec3::new(1.5, 1.5, 1.)),
             StateScoped(Screen::Gameplay),
             Collider {
                 size: obj_collider_sizes[2],
@@ -571,5 +605,75 @@ fn generate_world(mut commands: Commands) {
             },
             ServerGameObject(2),
         ));
+    }
+    let num_walls = 8; //fastrand::usize(4..=6);
+
+    let wall_base_pos = [
+        Vec3::new(-300., 0., 3.),
+        Vec3::new(300., 0., 3.),
+        Vec3::new(0., 300., 3.),
+        Vec3::new(0., -300., 3.),
+        Vec3::new(212., 212., 3.),
+        Vec3::new(-212., 212., 3.),
+        Vec3::new(-212., -212., 3.),
+        Vec3::new(212., -212., 3.),
+    ];
+    println!("SPAWNING WALLS");
+    for i in 0..num_walls {
+        let mut rng = rand::thread_rng();
+
+        // Generate a random distance greater than the minimum radius (e.g., 250)
+        let x_offset = rng.gen_range(1.0..2.5); // You can adjust the upper bound here
+        let y_offset = rng.gen_range(1.0..1.4); // You can adjust the upper bound here
+        let pos = wall_base_pos[i] * Vec3::new(x_offset, y_offset, 1.);
+        let wall_type = rng.gen_range(0..=3);
+        let size = match wall_type {
+            0 => Vec2::new(64., 48.),
+            1 => Vec2::new(94., 48.),
+            2 => Vec2::new(32., 80.),
+            _ => Vec2::new(32., 114.),
+        };
+        commands.spawn((
+            Name::new("Wall"),
+            Transform::from_translation(pos).with_scale(Vec3::new(1.5, 1.5, 1.)),
+            StateScoped(Screen::Gameplay),
+            Collider {
+                size: size * 1.5,
+                collides_with_player: true,
+                collides_with_projectile: true,
+            },
+            ServerGameObject(3 + wall_type),
+        ));
+    }
+}
+
+fn spawn_coins(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut spawner: ResMut<CoinSpawner>,
+    mut server: ResMut<RenetServer>,
+) {
+    if spawner.timer.tick(time.delta()).just_finished() {
+        let mut rng = rand::thread_rng();
+        let x_offset = rng.gen_range(-800.0..800.0); // You can adjust the upper bound here
+        let y_offset = rng.gen_range(-400.0..400.0); // You can adjust the upper bound here
+        let pos = Vec3::new(x_offset, y_offset, 3.);
+        let coin_entity = commands.spawn((
+            Name::new("Coin"),
+            Coin { claimed_by: None },
+            Transform::from_translation(pos).with_scale(Vec3::new(1.5, 1.5, 1.)),
+            StateScoped(Screen::Gameplay),
+            Collider {
+                size: Vec2::new(20., 24.),
+                collides_with_player: true,
+                collides_with_projectile: false,
+            },
+        ));
+        let message = ServerMessages::SpawnCoin {
+            entity: coin_entity.id(),
+            translation: pos.into(),
+        };
+        let message = bincode::serialize(&message).unwrap();
+        server.broadcast_message(ServerChannel::ServerMessages, message);
     }
 }
