@@ -31,7 +31,7 @@ impl Plugin for AppPlugin {
 
         // Spawn the main camera.
         app.add_systems(Startup, spawn_camera);
-        app.add_systems(OnEnter(Screen::Gameplay), spawn_map);
+        app.add_systems(OnEnter(Screen::Lobby), spawn_map);
         // Add Bevy plugins.
         app.add_plugins(
             DefaultPlugins

@@ -128,6 +128,7 @@ fn add_steam_network(app: &mut App) {
 
 fn main() {
     let mut app = App::new();
+
     app.add_plugins(DefaultPlugins);
 
     app.add_plugins(RenetServerPlugin);
@@ -140,6 +141,8 @@ fn main() {
     app.insert_resource(CoinSpawner {
         timer: Timer::from_seconds(1.2, TimerMode::Repeating),
     });
+
+    app.init_state::<Screen>();
 
     app.insert_resource(RenetServerVisualizer::<200>::default());
 
@@ -167,7 +170,13 @@ fn main() {
             .in_set(AppSet::Update),
     );
 
-    app.add_systems(FixedUpdate, (move_projectiles, spawn_coins));
+    app.add_systems(
+        FixedUpdate,
+        (
+            move_projectiles,
+            spawn_coins.run_if(in_state(Screen::Gameplay)),
+        ),
+    );
     app.add_systems(Startup, generate_world);
 
     app.add_systems(
@@ -189,8 +198,9 @@ fn server_update_system(
     mut lobby: ResMut<ServerLobby>,
     mut server: ResMut<RenetServer>,
     mut visualizer: ResMut<RenetServerVisualizer<200>>,
-    players: Query<(Entity, &Player, &Transform, &MovementController)>,
+    mut players: Query<(Entity, &mut Player, &Transform, &MovementController)>,
     game_objects: Query<(&Transform, &ServerGameObject)>,
+    mut next_screen: ResMut<NextState<Screen>>,
 ) {
     for event in server_events.read() {
         match event {
@@ -205,6 +215,7 @@ fn server_update_system(
                         id: player.id,
                         entity,
                         translation,
+                        is_ready: player.is_ready,
                     })
                     .unwrap();
                     server.send_message(*client_id, ServerChannel::ServerMessages, message);
@@ -242,6 +253,7 @@ fn server_update_system(
                     .insert(Player {
                         id: *client_id,
                         score: 0,
+                        is_ready: false,
                     })
                     .id();
 
@@ -252,6 +264,7 @@ fn server_update_system(
                     id: *client_id,
                     entity: player_entity,
                     translation,
+                    is_ready: false,
                 })
                 .unwrap();
                 server.broadcast_message(ServerChannel::ServerMessages, message);
@@ -324,6 +337,39 @@ fn server_update_system(
                         }
                     }
                 }
+                PlayerCommand::ToggleReady => {
+                    if let Some(player_entity) = lobby.players.get_mut(&client_id) {
+                        if let Ok((_, mut player, _, _)) = players.get_mut(*player_entity) {
+                            player.is_ready = !player.is_ready;
+                            println!("Player {} is now {:?}", client_id, player.is_ready);
+                            let message = bincode::serialize(&ServerMessages::SetPlayerReady {
+                                entity: *player_entity,
+                                is_ready: player.is_ready,
+                            })
+                            .unwrap();
+                            server.broadcast_message(ServerChannel::ServerMessages, message);
+                        }
+                    }
+                    if lobby.players.len() == 1 {
+                        continue;
+                    }
+
+                    let mut all_players_ready_check = true;
+                    for (_, player) in lobby.players.iter() {
+                        if let Ok((_, player, _, _)) = players.get(*player) {
+                            if !player.is_ready {
+                                all_players_ready_check = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_players_ready_check {
+                        let message = bincode::serialize(&ServerMessages::StartGame).unwrap();
+                        server.broadcast_message(ServerChannel::ServerMessages, message);
+                        next_screen.set(Screen::Gameplay);
+                    }
+                }
             }
         }
         while let Some(message) = server.receive_message(client_id, ClientChannel::Input) {
@@ -366,7 +412,9 @@ fn server_network_sync(
             .translations
             .push(transform.translation.into());
 
-        networked_entities.score = maybe_player.map(|player| player.score);
+        networked_entities
+            .score
+            .push(maybe_player.map(|player| player.score));
 
         networked_entities.facing_directions.push(
             maybe_direction
@@ -481,6 +529,7 @@ fn spawn_bot(
             .insert(Player {
                 id: client_id,
                 score: 0,
+                is_ready: true,
             })
             .insert(Bot {
                 auto_cast: Timer::from_seconds(3.0, TimerMode::Repeating),
@@ -494,6 +543,7 @@ fn spawn_bot(
             id: client_id,
             entity: player_entity,
             translation,
+            is_ready: true,
         })
         .unwrap();
         server.broadcast_message(ServerChannel::ServerMessages, message);
@@ -655,7 +705,7 @@ fn spawn_coins(
 ) {
     if spawner.timer.tick(time.delta()).just_finished() {
         let mut rng = rand::thread_rng();
-        let x_offset = rng.gen_range(-800.0..800.0); // You can adjust the upper bound here
+        let x_offset = rng.gen_range(-750.0..750.0); // You can adjust the upper bound here
         let y_offset = rng.gen_range(-400.0..400.0); // You can adjust the upper bound here
         let pos = Vec3::new(x_offset, y_offset, 3.);
         let coin_entity = commands.spawn((

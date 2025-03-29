@@ -5,6 +5,7 @@ use crate::demo::animation::{FacingDirection, PlayerAnimation};
 use crate::demo::lib::connection_config;
 use crate::demo::physics::Collider;
 use crate::screens::gameplay::ScoreText;
+use crate::screens::lobby::ToggleReadyEvent;
 use crate::screens::Screen;
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
@@ -13,6 +14,7 @@ use bevy::{
 };
 use bevy_egui::{EguiContexts, EguiPlugin};
 use bevy_renet::client_connected;
+use bevy_renet::netcode::NetcodeClientTransport;
 use bevy_renet::{
     renet::{ClientId, RenetClient},
     RenetClientPlugin,
@@ -60,27 +62,6 @@ fn add_netcode_network(app: &mut App) {
 
     app.configure_sets(Update, Connected.run_if(client_connected));
 
-    let client = RenetClient::new(connection_config());
-
-    let server_addr = "127.0.0.1:5000".parse().unwrap();
-    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let current_time = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
-    let client_id = current_time.as_millis() as u64;
-    let authentication = ClientAuthentication::Unsecure {
-        client_id,
-        protocol_id: PROTOCOL_ID,
-        server_addr,
-        user_data: None,
-    };
-
-    let transport = NetcodeClientTransport::new(current_time, authentication, socket).unwrap();
-
-    app.insert_resource(client);
-    app.insert_resource(transport);
-    app.insert_resource(CurrentClientId(client_id));
-
     // If any error is found we just panic
     #[allow(clippy::never_loop)]
     fn panic_on_error_system(mut renet_error: EventReader<NetcodeTransportError>) {
@@ -89,7 +70,34 @@ fn add_netcode_network(app: &mut App) {
         }
     }
 
+    fn connect(mut commands: Commands) {
+        let server_addr = "127.0.0.1:5000".parse().unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        let client = RenetClient::new(connection_config());
+
+        let current_time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let client_id = current_time.as_millis() as u64;
+        let authentication = ClientAuthentication::Unsecure {
+            client_id,
+            protocol_id: PROTOCOL_ID,
+            server_addr,
+            user_data: None,
+        };
+
+        let transport = NetcodeClientTransport::new(current_time, authentication, socket).unwrap();
+        commands.insert_resource(transport);
+        commands.insert_resource(client);
+
+        commands.insert_resource(CurrentClientId(client_id));
+    }
     app.add_systems(Update, panic_on_error_system);
+    app.add_systems(
+        Update,
+        connect.run_if(in_state(Screen::Lobby).and(run_once)),
+    );
 }
 
 #[cfg(feature = "steam")]
@@ -151,7 +159,8 @@ pub(super) fn plugins(app: &mut App) {
     app.insert_resource(PlayerInput::default());
     app.insert_resource(NetworkMapping::default());
 
-    app.add_systems(Update, (player_input));
+    app.add_systems(Update, (player_input).run_if(in_state(Screen::Gameplay)));
+    app.add_systems(Update, (player_read_input).run_if(in_state(Screen::Lobby)));
     app.add_systems(
         Update,
         (
@@ -168,7 +177,10 @@ pub(super) fn plugins(app: &mut App) {
     ));
 
     // app.add_systems(Startup, (setup_target));
-    app.add_systems(Update, update_visulizer_system);
+    app.add_systems(
+        Update,
+        update_visulizer_system.run_if(in_state(Screen::Gameplay)),
+    );
 }
 
 fn update_visulizer_system(
@@ -205,6 +217,14 @@ fn player_input(
         player_commands.send(PlayerCommand::BasicAttack);
     }
 }
+fn player_read_input(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut player_commands: EventWriter<PlayerCommand>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Space) {
+        player_commands.send(PlayerCommand::ToggleReady);
+    }
+}
 
 fn client_send_input(player_input: Res<PlayerInput>, mut client: ResMut<RenetClient>) {
     let input_message = bincode::serialize(&*player_input).unwrap();
@@ -233,6 +253,8 @@ pub fn client_sync_players(
     player_assets: Res<PlayerAssets>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut player_data: Query<&mut Player>,
+    mut toggles: EventWriter<ToggleReadyEvent>,
+    mut next_screen: ResMut<NextState<Screen>>,
 ) {
     let client_id = client_id.0;
     while let Some(message) = client.receive_message(ServerChannel::ServerMessages) {
@@ -242,6 +264,7 @@ pub fn client_sync_players(
                 id,
                 translation,
                 entity,
+                is_ready,
             } => {
                 println!("Player {} connected.", id);
                 let layout = TextureAtlasLayout::from_grid(
@@ -256,7 +279,11 @@ pub fn client_sync_players(
 
                 let mut client_entity = commands.spawn((
                     Name::new("Player"),
-                    Player { id, score: 0 },
+                    Player {
+                        id,
+                        score: 0,
+                        is_ready,
+                    },
                     Sprite {
                         image: player_assets.ducky.clone(),
                         texture_atlas: Some(TextureAtlas {
@@ -381,6 +408,22 @@ pub fn client_sync_players(
                     commands.entity(entity).despawn();
                 }
             }
+            ServerMessages::SetPlayerReady { entity, is_ready } => {
+                if let Some(client_entity) = network_mapping.0.get(&entity) {
+                    if let Ok(mut player) = player_data.get_mut(*client_entity) {
+                        player.is_ready = is_ready;
+                        println!("SEND EVENT");
+                        toggles.send(ToggleReadyEvent {
+                            player: *client_entity,
+                            is_ready,
+                        });
+                    }
+                }
+            }
+            ServerMessages::StartGame => {
+                println!("Starting game!");
+                next_screen.set(Screen::Gameplay);
+            }
         }
     }
 
@@ -398,7 +441,7 @@ pub fn client_sync_players(
                 if let Some(direction) = maybe_direction {
                     commands.entity(*entity).insert(FacingDirection(direction));
                 }
-                if let Some(score) = networked_entities.score {
+                if let Some(score) = networked_entities.score[i] {
                     if let Ok(mut player) = player_data.get_mut(*entity) {
                         player.score = score;
                     }
@@ -413,7 +456,9 @@ fn update_score_text(
     player_data: Query<&Player, With<ControlledPlayer>>,
 ) {
     for mut text in &mut score_text_query {
-        let player = player_data.single();
+        let Ok(player) = player_data.get_single() else {
+            return;
+        };
 
         text.0 = format!("Coins: {}", player.score);
     }

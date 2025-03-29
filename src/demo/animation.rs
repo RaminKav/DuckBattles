@@ -66,7 +66,6 @@ fn update_projectile_direction(
         //handle rotations
         let angle = dy.atan2(dx) - std::f32::consts::PI / 2.0;
         transform.rotation = Quat::from_rotation_z(angle);
-        println!("angle: {}", angle);
     }
 }
 

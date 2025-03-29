@@ -76,32 +76,56 @@ pub fn apply_movement(
     }
 
     'outer: for (entity, mover_transform, mover_collider, movement_this_frame) in movement_data {
+        let mut mover_mask = Vec3::ONE;
         for (collider_entity, collider_transform, collider, maybe_coin) in colliders.iter_mut() {
             if collider_entity == entity {
                 // Don't check collision with self.
                 continue;
             }
+            let mut collided = false;
             if collider.collides_with_player
                 && check_collision(
-                    &(mover_transform.translation + movement_this_frame),
+                    &(mover_transform.translation + movement_this_frame * Vec3::new(1., 0., 1.)),
                     &mover_collider,
                     &collider_transform.translation,
                     collider,
                 )
             {
-                // check if its a coin
                 if maybe_coin.is_some() {
                     let mut score = player_data.get_mut(entity).unwrap();
                     score.score += 1;
                     commands.entity(collider_entity).despawn();
+                    continue;
                 } else {
-                    // If we're colliding, don't move.
-                    continue 'outer;
+                    mover_mask.x = 0.;
                 }
+            }
+
+            if collider.collides_with_player
+                && check_collision(
+                    &(mover_transform.translation + movement_this_frame * Vec3::new(0., 1., 1.)),
+                    &mover_collider,
+                    &collider_transform.translation,
+                    collider,
+                )
+            {
+                if maybe_coin.is_some() {
+                    let mut score = player_data.get_mut(entity).unwrap();
+                    score.score += 1;
+                    commands.entity(collider_entity).despawn();
+                    continue;
+                } else {
+                    mover_mask.y = 0.;
+                }
+            }
+
+            // No movement possible.
+            if mover_mask == Vec3::ZERO {
+                continue 'outer;
             }
         }
         let mut transform = colliders.get_mut(entity).unwrap().1;
-        transform.translation += movement_this_frame;
+        transform.translation += movement_this_frame * mover_mask;
     }
     // for (entity, controller) in movement_query.iter_mut() {
     //     let velocity = controller.max_speed * controller.intent;

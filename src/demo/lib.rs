@@ -19,6 +19,7 @@ pub const PROTOCOL_ID: u64 = 7;
 pub struct Player {
     pub id: ClientId,
     pub score: u64,
+    pub is_ready: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, Component, Resource)]
@@ -32,6 +33,7 @@ pub struct PlayerInput {
 #[derive(Debug, Serialize, Deserialize, Event)]
 pub enum PlayerCommand {
     BasicAttack,
+    ToggleReady,
 }
 pub enum ClientChannel {
     Input,
@@ -51,9 +53,10 @@ pub enum ServerMessages {
         entity: Entity,
         id: ClientId,
         translation: [f32; 3],
+        is_ready: bool,
     },
     SpawnGameObject {
-        id: ClientId,
+        id: u64,
         translation: [f32; 3],
     },
     PlayerRemove {
@@ -71,6 +74,11 @@ pub enum ServerMessages {
     DespawnEntity {
         entity: Entity,
     },
+    SetPlayerReady {
+        entity: Entity,
+        is_ready: bool,
+    },
+    StartGame,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -78,7 +86,7 @@ pub struct NetworkedEntities {
     pub entities: Vec<Entity>,
     pub translations: Vec<[f32; 3]>,
     pub facing_directions: Vec<Option<[f32; 2]>>,
-    pub score: Option<u64>,
+    pub score: Vec<Option<u64>>,
 }
 
 impl From<ClientChannel> for u8 {
