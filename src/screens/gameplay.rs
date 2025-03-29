@@ -3,11 +3,15 @@
 use std::process::CommandArgs;
 
 use bevy::{input::common_conditions::input_just_pressed, prelude::*};
+use bevy_renet::renet::RenetServer;
 
 use crate::demo::client::PLAYER_BASE_COLLIDER_SIZE;
 use crate::demo::lib::Player;
+use crate::demo::lib::ServerChannel;
+use crate::demo::lib::ServerMessages;
 use crate::demo::physics::Collider;
 use crate::demo::player;
+use crate::demo::player::Coin;
 use crate::theme::widgets::Containers;
 use crate::theme::widgets::Widgets;
 use crate::{
@@ -120,4 +124,32 @@ pub fn handle_score_event(
             println!("Player {:?} score: {:?}", entity, player.score);
         }
     }
+}
+
+pub fn spawn_coin(
+    commands: &mut Commands,
+    server: &mut ResMut<RenetServer>,
+    position: Vec3,
+) -> Entity {
+    let coin_entity = commands
+        .spawn((
+            Name::new("Coin"),
+            Coin { claimed_by: None },
+            Transform::from_translation(position).with_scale(Vec3::new(1.5, 1.5, 1.)),
+            StateScoped(Screen::Gameplay),
+            Collider {
+                size: Vec2::new(20., 24.),
+                collides_with_player: true,
+                collides_with_projectile: false,
+            },
+        ))
+        .id();
+    let message = ServerMessages::SpawnCoin {
+        entity: coin_entity,
+        translation: position.into(),
+    };
+    let message = bincode::serialize(&message).unwrap();
+    server.broadcast_message(ServerChannel::ServerMessages, message);
+
+    coin_entity
 }

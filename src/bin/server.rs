@@ -22,7 +22,7 @@ use chexy_butt_balloons::{
         player::{Coin, PlayerAssets},
     },
     screens::{
-        gameplay::{handle_score_event, ScoreEvent},
+        gameplay::{handle_score_event, spawn_coin, ScoreEvent},
         Screen,
     },
     AppSet,
@@ -64,11 +64,12 @@ struct Bot {
 #[derive(Debug, Resource)]
 struct BotId(u64);
 
-#[derive(Component, Debug, Clone, Copy, Default, Reflect)]
+#[derive(Component, Debug, Clone, Copy, Reflect)]
 #[reflect(Component)]
 pub struct Projectile {
     pub speed: f32,
     pub direction: Vec2,
+    pub owner: Entity,
 }
 
 // #[cfg(feature = "netcode")]
@@ -330,6 +331,7 @@ fn server_update_system(
                                 .insert(Projectile {
                                     speed: PROJECTILE_MOVE_SPEED,
                                     direction: player_dir,
+                                    owner: player_entity.clone(),
                                 })
                                 .id();
                             let message = ServerMessages::SpawnProjectile {
@@ -450,16 +452,19 @@ fn move_players_system(
 fn move_projectiles(
     mut commands: Commands,
     time: Res<Time>,
+    mut score_event: EventWriter<ScoreEvent>,
     mut query: Query<(Entity, &Projectile, &mut Transform, &Collider), With<Projectile>>,
-    colliders: Query<(&Transform, &Collider), Without<Projectile>>,
+    colliders: Query<(Entity, &Transform, &Collider, Option<&Player>), Without<Projectile>>,
+    mut server: ResMut<RenetServer>,
 ) {
     for (e, projectile, mut proj_transform, proj_collider) in &mut query {
         let movement_this_frame =
             projectile.direction.extend(0.0) * projectile.speed * time.delta_secs();
-        for (collider_transform, collider) in &colliders {
+        for (collider_entity, collider_transform, collider, maybe_player) in &colliders {
             //use check_collision
 
             if collider.collides_with_projectile
+                && projectile.owner != collider_entity
                 && check_collision(
                     &(proj_transform.translation + movement_this_frame),
                     proj_collider,
@@ -467,6 +472,21 @@ fn move_projectiles(
                     collider,
                 )
             {
+                if let Some(player) = maybe_player {
+                    let penalty = i64::min(5, player.score);
+                    score_event.send(ScoreEvent {
+                        player: collider_entity,
+                        delta: -penalty,
+                    });
+                    for _ in 0..penalty {
+                        let mut rng = rand::thread_rng();
+                        let player_pos = collider_transform.translation;
+                        let x_offset = rng.gen_range(-200.0..200.0); // You can adjust the upper bound here
+                        let y_offset = rng.gen_range(-200.0..200.0); // You can adjust the upper bound here
+                        let pos = player_pos + Vec3::new(x_offset, y_offset, 3.);
+                        spawn_coin(&mut commands, &mut server, pos);
+                    }
+                }
                 // If we're colliding, don't move.
                 commands.entity(e).despawn();
                 return;
@@ -537,7 +557,7 @@ fn spawn_bot(
                 is_ready: true,
             })
             .insert(Bot {
-                auto_cast: Timer::from_seconds(3.0, TimerMode::Repeating),
+                auto_cast: Timer::from_seconds(1.0, TimerMode::Repeating),
             })
             .id();
 
@@ -558,10 +578,10 @@ fn spawn_bot(
 fn bot_autocast(
     time: Res<Time>,
     mut server: ResMut<RenetServer>,
-    mut bots: Query<(&Transform, &mut Bot), With<Player>>,
+    mut bots: Query<(Entity, &Transform, &mut Bot), With<Player>>,
     mut commands: Commands,
 ) {
-    for (transform, mut bot) in &mut bots {
+    for (entity, transform, mut bot) in &mut bots {
         bot.auto_cast.tick(time.delta());
         if !bot.auto_cast.just_finished() {
             continue;
@@ -584,6 +604,7 @@ fn bot_autocast(
             .insert(Projectile {
                 speed: PROJECTILE_MOVE_SPEED,
                 direction: bot_dir,
+                owner: entity,
             })
             .insert(Collider {
                 size: Vec2::new(12., 18.),
@@ -713,22 +734,6 @@ fn spawn_coins(
         let x_offset = rng.gen_range(-750.0..750.0); // You can adjust the upper bound here
         let y_offset = rng.gen_range(-400.0..400.0); // You can adjust the upper bound here
         let pos = Vec3::new(x_offset, y_offset, 3.);
-        let coin_entity = commands.spawn((
-            Name::new("Coin"),
-            Coin { claimed_by: None },
-            Transform::from_translation(pos).with_scale(Vec3::new(1.5, 1.5, 1.)),
-            StateScoped(Screen::Gameplay),
-            Collider {
-                size: Vec2::new(20., 24.),
-                collides_with_player: true,
-                collides_with_projectile: false,
-            },
-        ));
-        let message = ServerMessages::SpawnCoin {
-            entity: coin_entity.id(),
-            translation: pos.into(),
-        };
-        let message = bincode::serialize(&message).unwrap();
-        server.broadcast_message(ServerChannel::ServerMessages, message);
+        spawn_coin(&mut commands, &mut server, pos);
     }
 }

@@ -50,7 +50,7 @@ pub struct CurrentClientId(u64);
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Connected;
 
-pub const PLAYER_BASE_COLLIDER_SIZE: Vec2 = Vec2::new(14., 24.);
+pub const PLAYER_BASE_COLLIDER_SIZE: Vec2 = Vec2::new(14., 10.);
 
 // #[cfg(feature = "netcode")]
 fn add_netcode_network(app: &mut App) {

@@ -87,7 +87,8 @@ pub fn apply_movement(
             }
             if collider.collides_with_player
                 && check_collision(
-                    &(mover_transform.translation + movement_this_frame * Vec3::new(1., 0., 1.)),
+                    &(mover_transform.translation - Vec3::new(0., 10., 0.)
+                        + movement_this_frame * Vec3::new(1., 0., 1.)),
                     &mover_collider,
                     &collider_transform.translation,
                     collider,
@@ -107,7 +108,8 @@ pub fn apply_movement(
 
             if collider.collides_with_player
                 && check_collision(
-                    &(mover_transform.translation + movement_this_frame * Vec3::new(0., 1., 1.)),
+                    &(mover_transform.translation - Vec3::new(0., 10., 0.)
+                        + movement_this_frame * Vec3::new(0., 1., 1.)),
                     &mover_collider,
                     &collider_transform.translation,
                     collider,
