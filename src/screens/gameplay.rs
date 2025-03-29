@@ -1,7 +1,13 @@
 //! The screen state for the main gameplay.
 
+use std::process::CommandArgs;
+
 use bevy::{input::common_conditions::input_just_pressed, prelude::*};
 
+use crate::demo::client::PLAYER_BASE_COLLIDER_SIZE;
+use crate::demo::lib::Player;
+use crate::demo::physics::Collider;
+use crate::demo::player;
 use crate::theme::widgets::Containers;
 use crate::theme::widgets::Widgets;
 use crate::{
@@ -18,7 +24,7 @@ pub(super) fn plugin(app: &mut App) {
         (play_gameplay_music, spawn_score_text),
     );
     app.add_systems(OnExit(Screen::Gameplay), stop_music);
-
+    app.add_event::<ScoreEvent>();
     app.add_systems(
         Update,
         return_to_title_screen
@@ -30,6 +36,11 @@ fn spawn_level(mut commands: Commands) {
     commands.queue(spawn_level_command);
 }
 
+#[derive(Event)]
+pub struct ScoreEvent {
+    pub player: Entity,
+    pub delta: i64,
+}
 #[derive(Resource, Asset, Reflect, Clone)]
 pub struct GameplayMusic {
     #[dependency]
@@ -85,4 +96,28 @@ fn spawn_score_text(mut commands: Commands) {
                 ..default()
             });
         });
+}
+
+pub fn calculate_score_growth(score: i64) -> f32 {
+    score as f32 * 0.1
+}
+
+pub fn handle_score_event(
+    mut events: EventReader<ScoreEvent>,
+    mut commands: Commands,
+    mut player_query: Query<(Entity, &mut Transform, &mut Player)>,
+) {
+    for event in events.read() {
+        if let Ok((entity, mut transform, mut player)) = player_query.get_mut(event.player) {
+            player.score += event.delta;
+            let score_growth = calculate_score_growth(player.score);
+            transform.scale = Vec3::splat(score_growth);
+            commands.entity(entity).insert(Collider {
+                size: PLAYER_BASE_COLLIDER_SIZE * score_growth,
+                collides_with_player: true,
+                collides_with_projectile: true,
+            });
+            println!("Player {:?} score: {:?}", entity, player.score);
+        }
+    }
 }

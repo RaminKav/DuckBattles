@@ -4,7 +4,7 @@ use crate::demo::animation::{FacingDirection, PlayerAnimation};
 
 use crate::demo::lib::connection_config;
 use crate::demo::physics::Collider;
-use crate::screens::gameplay::ScoreText;
+use crate::screens::gameplay::{calculate_score_growth, ScoreText};
 use crate::screens::lobby::ToggleReadyEvent;
 use crate::screens::Screen;
 use bevy::{
@@ -49,6 +49,8 @@ pub struct CurrentClientId(u64);
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Connected;
+
+pub const PLAYER_BASE_COLLIDER_SIZE: Vec2 = Vec2::new(14., 24.);
 
 // #[cfg(feature = "netcode")]
 fn add_netcode_network(app: &mut App) {
@@ -433,19 +435,24 @@ pub fn client_sync_players(
             if let Some(entity) = network_mapping.0.get(&networked_entities.entities[i]) {
                 let translation = networked_entities.translations[i].into();
                 let maybe_direction = networked_entities.facing_directions[i].map(Vec2::from_array);
-                let transform = Transform {
+                let mut transform = Transform {
                     translation,
                     ..Default::default()
                 };
-                commands.entity(*entity).insert(transform);
                 if let Some(direction) = maybe_direction {
                     commands.entity(*entity).insert(FacingDirection(direction));
                 }
                 if let Some(score) = networked_entities.score[i] {
                     if let Ok(mut player) = player_data.get_mut(*entity) {
                         player.score = score;
+                        transform.scale = Vec3::new(
+                            1.0 + calculate_score_growth(score),
+                            1.0 + calculate_score_growth(score),
+                            1.0,
+                        );
                     }
                 }
+                commands.entity(*entity).insert(transform);
             }
         }
     }

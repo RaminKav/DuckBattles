@@ -65,8 +65,8 @@ impl Plugin for AppPlugin {
         // Add other plugins.
         app.add_plugins((
             asset_tracking::plugin,
-            demo::plugin,
             screens::plugin,
+            demo::plugin,
             theme::plugin,
         ));
 

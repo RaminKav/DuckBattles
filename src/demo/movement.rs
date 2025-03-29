@@ -15,7 +15,10 @@
 
 use bevy::{prelude::*, window::PrimaryWindow};
 
-use crate::AppSet;
+use crate::{
+    screens::{gameplay::ScoreEvent, Screen},
+    AppSet,
+};
 
 use super::{
     lib::Player,
@@ -25,12 +28,12 @@ use super::{
 
 pub fn plugin(app: &mut App) {
     app.register_type::<(MovementController, ScreenWrap)>();
-
     app.add_systems(
         Update,
         (apply_movement, apply_screen_wrap)
             .chain()
-            .in_set(AppSet::Update),
+            .in_set(AppSet::Update)
+            .run_if(in_state(Screen::Gameplay)),
     );
 }
 
@@ -62,8 +65,8 @@ impl Default for MovementController {
 pub fn apply_movement(
     mut commands: Commands,
     time: Res<Time>,
+    mut score_event: EventWriter<ScoreEvent>,
     mut movement_query: Query<(Entity, &MovementController)>,
-    mut player_data: Query<&mut Player>,
     mut colliders: Query<(Entity, &mut Transform, &Collider, Option<&Coin>)>,
 ) {
     let mut movement_data: Vec<_> = vec![];
@@ -82,7 +85,6 @@ pub fn apply_movement(
                 // Don't check collision with self.
                 continue;
             }
-            let mut collided = false;
             if collider.collides_with_player
                 && check_collision(
                     &(mover_transform.translation + movement_this_frame * Vec3::new(1., 0., 1.)),
@@ -92,8 +94,10 @@ pub fn apply_movement(
                 )
             {
                 if maybe_coin.is_some() {
-                    let mut score = player_data.get_mut(entity).unwrap();
-                    score.score += 1;
+                    score_event.send(ScoreEvent {
+                        player: entity,
+                        delta: 1,
+                    });
                     commands.entity(collider_entity).despawn();
                     continue;
                 } else {
@@ -110,8 +114,10 @@ pub fn apply_movement(
                 )
             {
                 if maybe_coin.is_some() {
-                    let mut score = player_data.get_mut(entity).unwrap();
-                    score.score += 1;
+                    score_event.send(ScoreEvent {
+                        player: entity,
+                        delta: 1,
+                    });
                     commands.entity(collider_entity).despawn();
                     continue;
                 } else {

@@ -12,6 +12,7 @@ use bevy_renet::{
 use chexy_butt_balloons::{
     demo::{
         animation::FacingDirection,
+        client::PLAYER_BASE_COLLIDER_SIZE,
         lib::{
             connection_config, ClientChannel, NetworkedEntities, Player, PlayerCommand,
             PlayerInput, ServerChannel, ServerMessages, Velocity, PROTOCOL_ID,
@@ -20,7 +21,10 @@ use chexy_butt_balloons::{
         physics::{check_collision, Collider},
         player::{Coin, PlayerAssets},
     },
-    screens::Screen,
+    screens::{
+        gameplay::{handle_score_event, ScoreEvent},
+        Screen,
+    },
     AppSet,
 };
 
@@ -143,9 +147,10 @@ fn main() {
     });
 
     app.init_state::<Screen>();
+    app.add_systems(Update, handle_score_event);
 
     app.insert_resource(RenetServerVisualizer::<200>::default());
-
+    app.add_event::<ScoreEvent>();
     // #[cfg(feature = "netcode")]
     add_netcode_network(&mut app);
 
@@ -244,7 +249,7 @@ fn server_update_system(
                         },
                     ))
                     .insert(Collider {
-                        size: Vec2::new(14., 24.),
+                        size: PLAYER_BASE_COLLIDER_SIZE,
                         collides_with_player: true,
                         collides_with_projectile: true,
                     })
