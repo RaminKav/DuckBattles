@@ -7,7 +7,6 @@ use bevy::{
     image::{ImageLoaderSettings, ImageSampler},
     prelude::*,
 };
-use bevy_renet::renet::ClientId;
 
 use crate::{
     asset_tracking::LoadResource, demo::animation::PlayerAnimation, screens::Screen, AppSet,

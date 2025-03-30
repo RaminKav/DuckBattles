@@ -3,7 +3,7 @@
 use std::process::CommandArgs;
 
 use bevy::{input::common_conditions::input_just_pressed, prelude::*};
-use bevy_renet::renet::RenetServer;
+use bevy_renet2::prelude::RenetServer;
 
 use crate::demo::client::PLAYER_BASE_COLLIDER_SIZE;
 use crate::demo::lib::Player;

@@ -1,14 +1,18 @@
-use std::{collections::HashMap, f32::consts::PI};
+use std::{
+    collections::HashMap,
+    f32::consts::PI,
+    net::{SocketAddr, UdpSocket},
+    time::SystemTime,
+};
+use warp::Filter;
 
 use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::*,
 };
 use bevy_egui::{EguiContexts, EguiPlugin};
-use bevy_renet::{
-    renet::{ClientId, RenetServer, ServerEvent},
-    RenetServerPlugin,
-};
+
+use bevy_renet2::prelude::{ClientId, RenetServer, RenetServerPlugin, ServerEvent};
 use chexy_butt_balloons::{
     demo::{
         animation::FacingDirection,
@@ -29,7 +33,10 @@ use chexy_butt_balloons::{
 };
 
 use rand::Rng;
-use renet_visualizer::RenetServerVisualizer;
+use renet2_netcode::{
+    NativeSocket, ServerAuthentication, ServerCertHash, ServerSetupConfig, WebServerDestination,
+};
+use renet2_visualizer::RenetServerVisualizer;
 
 #[derive(Component)]
 pub struct ServerGameObject(pub u64);
@@ -73,8 +80,8 @@ pub struct Projectile {
 }
 
 // #[cfg(feature = "netcode")]
-fn add_netcode_network(app: &mut App) {
-    use bevy_renet::netcode::{
+fn setup_udp_server(app: &mut App) {
+    use bevy_renet2::netcode::{
         NetcodeServerPlugin, NetcodeServerTransport, ServerAuthentication, ServerConfig,
     };
     use std::{net::UdpSocket, time::SystemTime};
@@ -88,47 +95,117 @@ fn add_netcode_network(app: &mut App) {
     let current_time: std::time::Duration = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
-    let server_config = ServerConfig {
+    let server_config = ServerSetupConfig {
         current_time,
         max_clients: 64,
         protocol_id: PROTOCOL_ID,
-        public_addresses: vec![public_addr],
+        socket_addresses: vec![vec![public_addr]],
         authentication: ServerAuthentication::Unsecure,
     };
 
-    let transport = NetcodeServerTransport::new(server_config, socket).unwrap();
+    let transport =
+        NetcodeServerTransport::new(server_config, NativeSocket::new(socket).unwrap()).unwrap();
     app.insert_resource(server);
     app.insert_resource(transport);
 }
 
-#[cfg(feature = "steam")]
-fn add_steam_network(app: &mut App) {
-    use bevy_renet::steam::{
-        AccessPermission, SteamServerConfig, SteamServerPlugin, SteamServerTransport,
+struct ClientConnectionInfo {
+    native_addr: String,
+    wt_dest: WebServerDestination,
+    ws_url: url::Url,
+    cert_hash: ServerCertHash,
+}
+
+#[cfg(target_family = "wasm")]
+fn setup_wasm_server(app: &mut App) {
+    use renet2_netcode::{
+        BoxedSocket, NativeSocket, NetcodeServerTransport, ServerCertHash, ServerSetupConfig,
+        ServerSocket, WebServerDestination, WebSocketServer, WebSocketServerConfig,
+        WebTransportServer, WebTransportServerConfig,
     };
-    use demo_bevy::connection_config;
-    use steamworks::SingleClient;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    let (steam_client, single) = steamworks::Client::init_app(480).unwrap();
+    let http_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+    let max_clients = 10;
 
-    let server: RenetServer = RenetServer::new(connection_config());
+    // Native socket
+    let wildcard_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let native_socket = NativeSocket::new(UdpSocket::bind(wildcard_addr).unwrap()).unwrap();
 
-    let steam_transport_config = SteamServerConfig {
-        max_clients: 10,
-        access_permission: AccessPermission::Public,
+    // WebTransport socket
+    let (wt_socket, cert_hash) = {
+        let (config, cert_hash) =
+            WebTransportServerConfig::new_selfsigned(wildcard_addr, max_clients).unwrap();
+        (
+            WebTransportServer::new(config, runtime.handle().clone()).unwrap(),
+            cert_hash,
+        )
     };
-    let transport = SteamServerTransport::new(&steam_client, steam_transport_config).unwrap();
 
-    app.add_plugins(SteamServerPlugin);
+    // WebSocket socket
+    let ws_socket = {
+        let config = WebSocketServerConfig::new(wildcard_addr, max_clients);
+        WebSocketServer::new(config, runtime.handle().clone()).unwrap()
+    };
+
+    // Save connection info
+    let client_connection_info = ClientConnectionInfo {
+        native_addr: native_socket.addr().unwrap().to_string(),
+        wt_dest: wt_socket.addr().unwrap().into(),
+        ws_url: ws_socket.url(),
+        cert_hash,
+    };
+
+    // Setup netcode server transport
+    let current_time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let server_config = ServerSetupConfig {
+        current_time,
+        max_clients,
+        protocol_id: 0,
+        socket_addresses: vec![
+            vec![native_socket.addr().unwrap()],
+            vec![wt_socket.addr().unwrap()],
+            vec![ws_socket.addr().unwrap()],
+        ],
+        authentication: ServerAuthentication::Unsecure,
+    };
+    let transport = NetcodeServerTransport::new_with_sockets(
+        server_config,
+        Vec::from([
+            BoxedSocket::new(native_socket),
+            BoxedSocket::new(wt_socket),
+            BoxedSocket::new(ws_socket),
+        ]),
+    )
+    .unwrap();
+    debug!("transport created");
+
+    // Run HTTP server for clients to get connection info.
+    runtime.spawn(async move { run_http_server(http_addr, client_connection_info).await });
+
+    let server = RenetServer::new(connection_config());
     app.insert_resource(server);
-    app.insert_non_send_resource(transport);
-    app.insert_non_send_resource(single);
+    app.insert_resource(transport);
+}
 
-    fn steam_callbacks(client: NonSend<SingleClient>) {
-        client.run_callbacks();
-    }
+async fn run_http_server(http_addr: SocketAddr, client_connection_info: ClientConnectionInfo) {
+    let native_addr = client_connection_info.native_addr;
+    let wt_dest = client_connection_info.wt_dest;
+    let ws_url = client_connection_info.ws_url;
+    let cert_hash = client_connection_info.cert_hash;
 
-    app.add_systems(PreUpdate, steam_callbacks);
+    let native = warp::path!("native").map(move || warp::reply::json(&native_addr));
+
+    let cors = warp::cors().allow_any_origin();
+    let wasm = warp::path!("wasm")
+        .map(move || warp::reply::json(&(&wt_dest, &cert_hash, &ws_url)))
+        .with(cors);
+
+    let routes = warp::get().and(native.or(wasm));
+
+    warp::serve(routes).run(http_addr).await;
 }
 
 fn main() {
@@ -152,11 +229,12 @@ fn main() {
 
     app.insert_resource(RenetServerVisualizer::<200>::default());
     app.add_event::<ScoreEvent>();
-    // #[cfg(feature = "netcode")]
-    add_netcode_network(&mut app);
 
-    #[cfg(feature = "steam")]
-    add_steam_network(&mut app);
+    #[cfg(not(target_family = "wasm"))]
+    setup_udp_server(&mut app);
+
+    #[cfg(target_family = "wasm")]
+    setup_wasm_server(&mut app);
 
     app.add_systems(
         Update,

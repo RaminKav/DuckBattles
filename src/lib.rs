@@ -11,10 +11,11 @@ use std::time::Duration;
 use bevy::{
     asset::AssetMetaCheck,
     audio::{AudioPlugin, Volume},
+    log::LogPlugin,
     prelude::*,
     window::WindowMode,
 };
-use bevy_renet::renet::{ChannelConfig, ClientId, ConnectionConfig, SendType};
+use bevy_mod_reqwest::ReqwestPlugin;
 use demo::player::PlayerAssets;
 use screens::Screen;
 use serde::{Deserialize, Serialize};
@@ -31,7 +32,9 @@ impl Plugin for AppPlugin {
 
         // Spawn the main camera.
         app.add_systems(Startup, spawn_camera);
-        app.add_systems(OnEnter(Screen::Lobby), spawn_map);
+        app.add_systems(OnEnter(Screen::Lobby), spawn_map)
+            .add_plugins(ReqwestPlugin::default());
+
         // Add Bevy plugins.
         app.add_plugins(
             DefaultPlugins

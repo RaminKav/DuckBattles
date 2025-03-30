@@ -4,12 +4,12 @@ use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::*,
 };
-use bevy_renet::renet::{ChannelConfig, ClientId, ConnectionConfig, SendType};
+use bevy_renet2::prelude::{ChannelConfig, ClientId, ConnectionConfig, SendType};
 use serde::{Deserialize, Serialize};
 
 // Client-Server setup stuff, move somewhere else later
 // #[cfg(feature = "netcode")]
-pub const PRIVATE_KEY: &[u8; bevy_renet::netcode::NETCODE_KEY_BYTES] =
+pub const PRIVATE_KEY: &[u8; bevy_renet2::netcode::NETCODE_KEY_BYTES] =
     b"an example very very secret key."; // 32-bytes
                                          // #[cfg(feature = "netcode")]
 pub const PROTOCOL_ID: u64 = 7;
