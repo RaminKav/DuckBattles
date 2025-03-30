@@ -1,2 +1,2 @@
 [phases.setup]
-aptPkgs = ["libwayland-dev", "pkg-config", "libasound2-dev"]
+aptPkgs = ["libwayland-dev", "pkg-config", "libasound2-dev", "libudev-dev"]
