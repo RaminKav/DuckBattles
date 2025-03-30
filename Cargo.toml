@@ -103,3 +103,6 @@ inherits = "release"
 opt-level = 3
 # Keep debug information in the binary.
 strip = "none"
+
+[build]
+jobs = 1
