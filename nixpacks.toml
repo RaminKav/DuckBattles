@@ -1,7 +1,2 @@
 [phases.setup]
-nixPkgs = ["wayland", "alsa-lib", "udev"]
-
-[phases.build]
-commands = [
-    "export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
-]
+nixPkgs = ["wayland", "alsa-lib", "udev", "pkg-config"]
