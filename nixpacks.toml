@@ -1,5 +1,5 @@
 [phases.setup]
-aptPkgs = ["libwayland-dev", "pkg-config", "libasound2-dev", "libudev-dev", "libffi-dev", "libffi8"]
+aptPkgs = ["libwayland-dev", "pkg-config", "libasound2-dev", "libudev-dev", "libffi-dev", "libffi"]
 
 [phases.build]
 commands = [
