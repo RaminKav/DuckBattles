@@ -125,7 +125,7 @@ fn setup_wasm_server(app: &mut App) {
     };
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    let http_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+    let http_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
     let max_clients = 10;
 
     // Native socket
