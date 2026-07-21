@@ -1,0 +1,53 @@
+name: Deploy Client
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SITE_DOMAIN: www.duckbattles.com
+  AUTH_BASE_URL: https://api.duckbattles.com
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          target: wasm32-unknown-unknown
+
+      - name: Cache Cargo binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-bin-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-bin-
+
+      - name: Install Trunk
+        run: cargo install trunk --locked
+
+      - name: Build web client
+        env:
+          CHEXY_AUTH_BASE_URL: ${{ env.AUTH_BASE_URL }}
+          CHEXY_CLIENT_TRANSPORT: wasm_ws
+        run: trunk build --release
+
+      - name: Add CNAME for custom domain
+        run: |
+          mkdir -p target/trunk
+          echo "${{ env.SITE_DOMAIN }}" > target/trunk/CNAME
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: target/trunk
+          cname: ${{ env.SITE_DOMAIN }}
+

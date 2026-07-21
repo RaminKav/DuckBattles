@@ -20,8 +20,15 @@ When the timer runs out, the player with the most lilly pads wins.
 #![cfg_attr(not(feature = "dev"), windows_subsystem = "windows")]
 
 use bevy::prelude::*;
-use chexy_butt_balloons::AppPlugin;
+#[cfg(feature = "server")]
+use chexy_butt_balloons::server::server::ServerPlugin;
+#[cfg(not(feature = "server"))]
+use chexy_butt_balloons::ClientPlugin;
 
 fn main() -> AppExit {
-    App::new().add_plugins(AppPlugin).run()
+    #[cfg(not(feature = "server"))]
+    return App::new().add_plugins(ClientPlugin).run();
+
+    #[cfg(feature = "server")]
+    return App::new().add_plugins(ServerPlugin).run();
 }

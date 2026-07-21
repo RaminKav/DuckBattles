@@ -1,4 +1,8 @@
 # Rust builds
 /target
+bevy_web/build
+target/trunk
+# Web distribution artifacts
+bevy_web/dist
 # This file contains environment-specific configuration like linker settings
 .cargo/config.toml

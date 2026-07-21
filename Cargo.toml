@@ -5,19 +5,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = { version = "0.15", features = ["wayland"] }
+bevy = { version = "0.15", default-features = false, features = ["bevy_state", "default_font"] }
 rand = "0.8"
-bevy_renet2 = {version = "0.7", features = ["serde"]}
+bevy_renet2 = {version = "0.8", features = ["serde"]}
 bincode = "1.3"
 fastrand = "2.0"
+js-sys = "0.3.77"
 url = {version = "2.4", features = ["serde"]}
 reqwest = { version = "0.12", features = ["json"] }
 bevy_mod_reqwest = "0.18.0"
-renet2_netcode = {version = "0.7" }
-tokio = { version = "1", features = ["full"] }
-warp = "0.3"
-renet2_visualizer = { version = "0.7", features = ["bevy"] }
-bevy_egui = { version = "0.31", default-features = false }
+renet2_netcode = {version = "0.8" }
+renet2_setup = {version = "0.8"}
+enfync = { version = "0.1", optional = true, default-features = false, features = ["builtin"] }
+tokio = { version = "1.44.1", optional = true, default-features = false, features = ["sync", "macros", "io-util", "rt", "time"] }
+warp = {version ="0.3", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 
 # Compile low-severity logs out of native builds for performance.
@@ -26,29 +27,22 @@ log = { version = "0.4", features = [
     "release_max_level_warn",
 ] }
 # Compile low-severity logs out of web builds for performance.
-tracing = { version = "0.1", features = [
-    "max_level_debug",
-    "release_max_level_warn",
-] }
+tracing = { version = "0.1", default-features = false, features = ["release_max_level_debug"] }
+
 
 [features]
+server = ["dep:warp", "dep:tokio", "dep:enfync", "bevy/bevy_asset", "bevy/bevy_scene",]
 netcode = ["bevy_renet2/netcode"]
 steam = ["bevy_renet2/steam"]
 default = [
     # Default to a native dev build.
     "dev_native",
 ]
-dev = [
-    # Improve compile times for dev builds by linking Bevy as a dynamic library.
-    "bevy/dynamic_linking",
-    "bevy/bevy_dev_tools",
-]
+
 dev_native = [
-    "dev",
-    # Enable asset hot reloading for native dev builds.
-    # "bevy/file_watcher",
-    # Enable embedded asset hot reloading for native dev builds.
-    # "bevy/embedded_watcher",
+     "bevy/wayland", "bevy/bevy_color", "bevy/bevy_ui", "bevy/webgl2",
+     "bevy/bevy_audio", "bevy/bevy_asset", "bevy/bevy_core_pipeline", "bevy/vorbis", "bevy/png",
+     "bevy/bevy_render", "bevy/bevy_state", "bevy/bevy_window", "bevy/bevy_winit", "bevy/bevy_text",
 ]
 
 
@@ -106,3 +100,15 @@ strip = "none"
 
 [build]
 jobs = 1
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+bevy_renet2 = { version = "0.8", features = ["wt_client_transport", "ws_client_transport"] }
+renet2_setup = { version = "0.8", features = ["bevy", "client", "wt_client_transport", "ws_client_transport"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bevy_renet2 = { version = "0.8", features = ["native_transport", "wt_server_transport", "ws_server_transport"] }
+renet2_setup = { version = "0.8", features = ["bevy", "server", "native_transport", "wt_server_transport", "ws_server_transport"] }
+
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]

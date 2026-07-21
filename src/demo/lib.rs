@@ -34,6 +34,7 @@ pub struct PlayerInput {
 pub enum PlayerCommand {
     BasicAttack,
     ToggleReady,
+    DebugSpawnBot,
 }
 pub enum ClientChannel {
     Input,
@@ -103,14 +104,14 @@ impl ClientChannel {
         vec![
             ChannelConfig {
                 channel_id: Self::Input.into(),
-                max_memory_usage_bytes: 5 * 1024 * 1024,
+                max_memory_usage_bytes: 1000 * 1024 * 1024,
                 send_type: SendType::ReliableOrdered {
                     resend_time: Duration::ZERO,
                 },
             },
             ChannelConfig {
                 channel_id: Self::Command.into(),
-                max_memory_usage_bytes: 5 * 1024 * 1024,
+                max_memory_usage_bytes: 1000 * 1024 * 1024,
                 send_type: SendType::ReliableOrdered {
                     resend_time: Duration::ZERO,
                 },
@@ -133,12 +134,12 @@ impl ServerChannel {
         vec![
             ChannelConfig {
                 channel_id: Self::NetworkedEntities.into(),
-                max_memory_usage_bytes: 10 * 1024 * 1024,
+                max_memory_usage_bytes: 1000 * 1024 * 1024,
                 send_type: SendType::Unreliable,
             },
             ChannelConfig {
                 channel_id: Self::ServerMessages.into(),
-                max_memory_usage_bytes: 10 * 1024 * 1024,
+                max_memory_usage_bytes: 1000 * 1024 * 1024,
                 send_type: SendType::ReliableOrdered {
                     resend_time: Duration::from_millis(200),
                 },

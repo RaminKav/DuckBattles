@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::time::UNIX_EPOCH;
+#[cfg(not(target_family = "wasm"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::demo::animation::{FacingDirection, PlayerAnimation};
 
@@ -13,21 +14,16 @@ use bevy::{
     prelude::Vec3,
     prelude::*,
 };
-use bevy_mod_reqwest::{BevyReqwest, JsonResponse, ReqwestErrorEvent, ReqwestResponseEvent};
-use renet2_netcode::{
-     ClientSocket, NativeSocket, NetcodeClientTransport, ServerCertHash, WebServerDestination
-};
+use bevy_mod_reqwest::*;
+use bevy_renet2::netcode::NetcodeClientPlugin;
+use renet2_netcode::NetcodeClientTransport;
 
-use bevy_egui::{EguiContexts, EguiPlugin};
-
-use bevy_renet2::prelude::{
-    client_connected, ClientId, ConnectionConfig, RenetClient, RenetClientPlugin,
-};
-use renet2_visualizer::{RenetClientVisualizer, RenetVisualizerStyle};
+use bevy_renet2::prelude::{client_connected, ClientId, RenetClient, RenetClientPlugin};
+use renet2_setup::{setup_renet2_client, ClientConnectPack, ConnectionType, ServerConnectToken};
 
 use super::lib::{
     ClientChannel, NetworkedEntities, Player, PlayerCommand, PlayerInput, ServerChannel,
-    ServerMessages,
+    ServerMessages, PROTOCOL_ID,
 };
 use super::player::PlayerAssets;
 
@@ -51,13 +47,132 @@ pub struct ClientLobby {
 #[derive(Debug, Resource)]
 pub struct CurrentClientId(u64);
 
+#[derive(Resource, Clone, Debug)]
+pub struct ClientNetworkConfig {
+    pub auth_base_url: String,
+    pub connection_type: ConnectionType,
+}
+
+impl ClientNetworkConfig {
+    fn resolve_auth_base_url() -> String {
+        std::env::var("CHEXY_AUTH_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| option_env!("CHEXY_AUTH_BASE_URL").map(|value| value.to_string()))
+            .unwrap_or_else(|| "http://localhost:8080".to_string())
+    }
+
+    fn resolve_connection_type() -> ConnectionType {
+        fn parse(value: &str) -> Option<ConnectionType> {
+            match value.to_ascii_lowercase().as_str() {
+                "memory" => Some(ConnectionType::Memory),
+                "native" => Some(ConnectionType::Native),
+                "wasm_wt" | "wasm-wt" => Some(ConnectionType::WasmWt),
+                "wasm_ws" | "wasm-ws" => Some(ConnectionType::WasmWs),
+                _ => None,
+            }
+        }
+
+        let env_value = std::env::var("CHEXY_CLIENT_TRANSPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| option_env!("CHEXY_CLIENT_TRANSPORT").map(|value| value.to_string()));
+
+        env_value
+            .and_then(|value| parse(value.trim()))
+            .unwrap_or_else(ConnectionType::inferred)
+    }
+
+    fn transport_slug(connection_type: ConnectionType) -> &'static str {
+        match connection_type {
+            ConnectionType::Memory => "memory",
+            ConnectionType::Native => "native",
+            ConnectionType::WasmWt => "wasm_wt",
+            ConnectionType::WasmWs => "wasm_ws",
+        }
+    }
+
+    pub fn from_env() -> Self {
+        Self {
+            auth_base_url: Self::resolve_auth_base_url(),
+            connection_type: Self::resolve_connection_type(),
+        }
+    }
+
+    fn auth_endpoint(&self, client_id: u64) -> String {
+        format!(
+            "{}/auth/{client_id}?transport={}",
+            self.auth_base_url.trim_end_matches('/'),
+            Self::transport_slug(self.connection_type)
+        )
+    }
+}
+
+impl Default for ClientNetworkConfig {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Connected;
 
-pub const PLAYER_BASE_COLLIDER_SIZE: Vec2 = Vec2::new(14., 10.);
+#[cfg(target_family = "wasm")]
+fn now_millis() -> u64 {
+    js_sys::Date::now() as u64
+}
 
+#[cfg(not(target_family = "wasm"))]
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub const PLAYER_BASE_COLLIDER_SIZE: Vec2 = Vec2::new(14., 10.);
+pub fn client_connected2(client: Option<Res<RenetClient>>) -> bool {
+    let c = client_connected(client);
+    c
+}
+
+pub fn setup_client_fr(mut client: BevyReqwest, config: Res<ClientNetworkConfig>) {
+    let client_id = now_millis();
+    let url = config.auth_endpoint(client_id);
+    println!("Setting up initial connection to server...");
+    bevy::log::info!(
+        "[CLIENT] Connecting to server at {url} using {:?}",
+        config.connection_type
+    );
+    let reqwest_request = client.post(url).build().expect("Failed to build request");
+    client
+        .send(reqwest_request)
+        .on_json_response(
+            move |trigger: Trigger<JsonResponse<ServerConnectToken>>, mut commands: Commands| {
+                let token = trigger.event().0.clone();
+                bevy::log::info!("[CLIENT] got response from server: {token:?}");
+
+                let connect_pack = ClientConnectPack::new(PROTOCOL_ID, token)
+                    .expect("Failed to create connect pack");
+                let connection_config = connection_config();
+
+                commands.remove_resource::<NetcodeClientTransport>();
+                let (client, transport) = setup_renet2_client(connection_config, connect_pack)
+                    .expect("Failed to setup renet2 client");
+
+                commands.insert_resource(client);
+                commands.insert_resource(transport);
+                commands.insert_resource(CurrentClientId(client_id));
+                bevy::log::info!("[CLIENT] DONE setting up connection with server!!");
+            },
+        )
+        .on_error(|trigger: Trigger<ReqwestErrorEvent>| {
+            let e = &trigger.event().0;
+            bevy::log::info!("error: {e:?}");
+        });
+}
 // #[cfg(feature = "netcode")]
- fn add_netcode_network(app: &mut App) {
+fn add_netcode_network(app: &mut App) {
     use super::lib::PROTOCOL_ID;
     use bevy_renet2::netcode::{
         ClientAuthentication, NetcodeClientPlugin, NetcodeClientTransport, NetcodeTransportError,
@@ -66,7 +181,7 @@ pub const PLAYER_BASE_COLLIDER_SIZE: Vec2 = Vec2::new(14., 10.);
 
     app.add_plugins(NetcodeClientPlugin);
 
-    app.configure_sets(Update, Connected.run_if(client_connected));
+    app.configure_sets(Update, Connected.run_if(client_connected2));
 
     // If any error is found we just panic
     #[allow(clippy::never_loop)]
@@ -75,137 +190,137 @@ pub const PLAYER_BASE_COLLIDER_SIZE: Vec2 = Vec2::new(14., 10.);
             panic!("{}", e);
         }
     }
-    #[cfg(target_family = "wasm")]
-    fn connect_wasm(mut client: BevyReqwest, mut commands: Commands) {
-        use renet2_netcode::{
-            webtransport_is_available_with_cert_hashes, ClientSocket, CongestionControl, NetcodeClientTransport, ServerCertHash, WebServerDestination, WebSocketClient, WebSocketClientConfig, WebTransportClient, WebTransportClientConfig
-        };
 
-        let url = "https://bored-api.appbrewery.com/random";
+    // #[cfg(target_family = "wasm")]
+    // fn connect_wasm(mut client: BevyReqwest, mut commands: Commands) {
+    //     use renet2_netcode::{
+    //         webtransport_is_available_with_cert_hashes, ClientSocket, CongestionControl, NetcodeClientTransport, ServerCertHash, WebServerDestination, WebSocketClient, WebSocketClientConfig, WebTransportClient, WebTransportClientConfig
+    //     };
 
-        let reqwest_request = client.get(url).build().unwrap();
+    //     let url = "https://bored-api.appbrewery.com/random";
 
-        client
-            .send(reqwest_request)
-            .on_json_response(
-                |trigger: Trigger<
-                    JsonResponse<(WebServerDestination, ServerCertHash, url::Url)>,
-                >| {
-                    let (wt_server_dest, wt_server_cert_hash, ws_server_url) = trigger.event().0;
-                    let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let connection_config = ConnectionConfig::test();
-        let (client, transport, client_id) = match webtransport_is_available_with_cert_hashes() {
-            true => {
-                tracing::info!("setting up webtransport client (server = {:?})", wt_server_dest);
+    //     let reqwest_request = client.get(url).build().unwrap();
 
-                let client_id = current_time.as_millis() as u64;
-                let client_auth = ClientAuthentication::Unsecure {
-                    client_id,
-                    protocol_id: 0,
-                    socket_id: 1, //WebTransport socket id is 1 in this example
-                    server_addr: wt_server_dest.clone().into(),
-                    user_data: None,
-                };
-                let socket_config = WebTransportClientConfig {
-                    server_dest: wt_server_dest.into(),
-                    congestion_control: CongestionControl::default(),
-                    server_cert_hashes: Vec::from([wt_server_cert_hash]),
-                };
-                let socket = WebTransportClient::new(socket_config);
+    //     client
+    //         .send(reqwest_request)
+    //         .on_json_response(
+    //             |trigger: Trigger<
+    //                 JsonResponse<(WebServerDestination, ServerCertHash, url::Url)>,
+    //             >| {
+    //                 let (wt_server_dest, wt_server_cert_hash, ws_server_url) = trigger.event().0;
+    //                 let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    //     let connection_config = ConnectionConfig::test();
+    //     let (client, transport, client_id) = match webtransport_is_available_with_cert_hashes() {
+    //         true => {
+    //             tracing::info!("setting up webtransport client (server = {:?})", wt_server_dest);
 
-                let client = RenetClient::new(connection_config, socket.is_reliable());
-                let transport = NetcodeClientTransport::new(current_time, client_auth, socket).unwrap();
+    //             let client_id = current_time.as_millis() as u64;
+    //             let client_auth = ClientAuthentication::Unsecure {
+    //                 client_id,
+    //                 protocol_id: 0,
+    //                 socket_id: 1, //WebTransport socket id is 1 in this example
+    //                 server_addr: wt_server_dest.clone().into(),
+    //                 user_data: None,
+    //             };
+    //             let socket_config = WebTransportClientConfig {
+    //                 server_dest: wt_server_dest.into(),
+    //                 congestion_control: CongestionControl::default(),
+    //                 server_cert_hashes: Vec::from([wt_server_cert_hash]),
+    //             };
+    //             let socket = WebTransportClient::new(socket_config);
 
-                (client, transport, client_id)
-            }
-            false => {
-                tracing::warn!("webtransport with cert hashes is not supported on this platform, falling back \
-                    to websockets");
-                tracing::info!("setting up websocket client (server = {:?})", ws_server_url.as_str());
-                let socket_config = WebSocketClientConfig {
-                    server_url: ws_server_url,
-                };
+    //             let client = RenetClient::new(connection_config, socket.is_reliable());
+    //             let transport = NetcodeClientTransport::new(current_time, client_auth, socket).unwrap();
 
-                let socket = WebSocketClient::new(socket_config).unwrap();
-                let client = RenetClient::new(connection_config, socket.is_reliable());
-                let client_id = current_time.as_millis() as u64;
+    //             (client, transport, client_id)
+    //         }
+    //         false => {
+    //             tracing::warn!("webtransport with cert hashes is not supported on this platform, falling back \
+    //                 to websockets");
+    //             tracing::info!("setting up websocket client (server = {:?})", ws_server_url.as_str());
+    //             let socket_config = WebSocketClientConfig {
+    //                 server_url: ws_server_url,
+    //             };
 
-                let client_auth = ClientAuthentication::Unsecure {
-                    client_id,
-                    protocol_id: 0,
-                    socket_id: 2, //WebSocket socket id is 2 in this example
-                    server_addr: socket.server_address(),
-                    user_data: None,
-                };
-                let transport = NetcodeClientTransport::new(current_time, client_auth, socket).unwrap();
+    //             let socket = WebSocketClient::new(socket_config).unwrap();
+    //             let client = RenetClient::new(connection_config, socket.is_reliable());
+    //             let client_id = current_time.as_millis() as u64;
 
-                (client, transport, client_id)
-            }
-        };
-        commands.insert_resource(transport);
-        commands.insert_resource(client);
-    
-        commands.insert_resource(CurrentClientId(client_id));
-                },
-            )
-            // In case of request error, it can be reached using an observersystem as well
-            .on_error(|trigger: Trigger<ReqwestErrorEvent>| {
-                let e = &trigger.event().0;
-                bevy::log::info!("error: {e:?}");
-            });
-    }
-    #[cfg(not(target_family = "wasm"))]
-    fn connect_udp(mut commands: Commands) {
-        println!("[CLIENT] Connecting to server...");
-        let server_addr = "127.0.0.1:5000".parse().unwrap();
-        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    //             let client_auth = ClientAuthentication::Unsecure {
+    //                 client_id,
+    //                 protocol_id: 0,
+    //                 socket_id: 2, //WebSocket socket id is 2 in this example
+    //                 server_addr: socket.server_address(),
+    //                 user_data: None,
+    //             };
+    //             let transport = NetcodeClientTransport::new(current_time, client_auth, socket).unwrap();
 
-        let client = RenetClient::new(connection_config(), false);
+    //             (client, transport, client_id)
+    //         }
+    //     };
+    //     commands.insert_resource(transport);
+    //     commands.insert_resource(client);
 
-        let current_time = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap();
-        let client_id = current_time.as_millis() as u64;
-        let authentication = ClientAuthentication::Unsecure {
-            client_id,
-            protocol_id: PROTOCOL_ID,
-            socket_id: 0,
-            server_addr,
-            user_data: None,
-        };
+    //     commands.insert_resource(CurrentClientId(client_id));
+    //             },
+    //         )
+    //         // In case of request error, it can be reached using an observersystem as well
+    //         .on_error(|trigger: Trigger<ReqwestErrorEvent>| {
+    //             let e = &trigger.event().0;
+    //             bevy::log::info!("error: {e:?}");
+    //         });
+    // }
+    // #[cfg(not(target_family = "wasm"))]
+    // fn connect_udp(mut commands: Commands) {
+    //     println!("[CLIENT] Connecting to server...");
+    //     let server_addr = "159.203.58.28:8080".parse().unwrap();
+    //     let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
 
+    //     let client = RenetClient::new(connection_config(), false);
 
-        let transport = NetcodeClientTransport::new(current_time, authentication, NativeSocket::new(socket).unwrap()).unwrap();
-        commands.insert_resource(transport);
-        commands.insert_resource(client);
+    //     let current_time = SystemTime::now()
+    //         .duration_since(SystemTime::UNIX_EPOCH)
+    //         .unwrap();
+    //     let client_id = current_time.as_millis() as u64;
+    //     let authentication = ClientAuthentication::Unsecure {
+    //         client_id,
+    //         protocol_id: PROTOCOL_ID,
+    //         socket_id: 0,
+    //         server_addr,
+    //         user_data: None,
+    //     };
 
-        commands.insert_resource(CurrentClientId(client_id));
-        println!("[CLIENT] Connected!");
+    //     let transport = NetcodeClientTransport::new(current_time, authentication, NativeSocket::new(socket).unwrap()).unwrap();
+    //     commands.insert_resource(transport);
+    //     commands.insert_resource(client);
 
-    }
+    //     commands.insert_resource(CurrentClientId(client_id));
+    //     println!("[CLIENT] Connected!");
+
+    // }
     app.add_systems(Update, panic_on_error_system);
 
-    #[cfg(target_family = "wasm")]
-    app.add_systems(
-        Update,
-        connect_wasm.run_if(in_state(Screen::Lobby).and(run_once)),
-    );
+    // #[cfg(target_family = "wasm")]
+    // app.add_systems(
+    //     Update,
+    //     connect_wasm.run_if(in_state(Screen::Lobby).and(run_once)),
+    // );
 
-    #[cfg(not(target_family = "wasm"))]
-    app.add_systems(
-        Update,
-        connect_udp.run_if(in_state(Screen::Lobby).and(run_once)),
-    );
+    // #[cfg(not(target_family = "wasm"))]
+    // app.add_systems(
+    //     Update,
+    //     connect_udp.run_if(in_state(Screen::Lobby).and(run_once)),
+    // );
 }
 
 pub(super) fn plugins(app: &mut App) {
     app.add_plugins(RenetClientPlugin);
     app.add_plugins(FrameTimeDiagnosticsPlugin);
     app.add_plugins(LogDiagnosticsPlugin::default());
-    app.add_plugins(EguiPlugin);
+    app.add_plugins(NetcodeClientPlugin);
 
     // #[cfg(feature = "netcode")]
-    add_netcode_network(app);
+    // add_netcode_network(app);
 
     app.add_event::<PlayerCommand>();
 
@@ -214,7 +329,9 @@ pub(super) fn plugins(app: &mut App) {
     app.insert_resource(NetworkMapping::default());
 
     app.add_systems(Update, (player_input).run_if(in_state(Screen::Gameplay)));
+    app.add_systems(Update, (debug_player_input));
     app.add_systems(Update, (player_read_input).run_if(in_state(Screen::Lobby)));
+    app.configure_sets(Update, Connected.run_if(client_connected2));
     app.add_systems(
         Update,
         (
@@ -225,32 +342,7 @@ pub(super) fn plugins(app: &mut App) {
         )
             .in_set(Connected),
     );
-
-    app.insert_resource(RenetClientVisualizer::<200>::new(
-        RenetVisualizerStyle::default(),
-    ));
-
-    // app.add_systems(Startup, (setup_target));
-    app.add_systems(
-        Update,
-        update_visulizer_system.run_if(in_state(Screen::Gameplay)),
-    );
-}
-
-fn update_visulizer_system(
-    mut egui_contexts: EguiContexts,
-    mut visualizer: ResMut<RenetClientVisualizer<200>>,
-    client: Res<RenetClient>,
-    mut show_visualizer: Local<bool>,
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-) {
-    visualizer.add_network_info(client.network_info());
-    if keyboard_input.just_pressed(KeyCode::F1) {
-        *show_visualizer = !*show_visualizer;
-    }
-    if *show_visualizer {
-        visualizer.show_window(egui_contexts.ctx_mut());
-    }
+    app.add_systems(OnEnter(Screen::Lobby), setup_client_fr);
 }
 
 fn player_input(
@@ -271,11 +363,20 @@ fn player_input(
         player_commands.send(PlayerCommand::BasicAttack);
     }
 }
+fn debug_player_input(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut player_commands: EventWriter<PlayerCommand>,
+) {
+    if keyboard_input.just_pressed(KeyCode::KeyB) {
+        player_commands.send(PlayerCommand::DebugSpawnBot);
+    }
+}
 fn player_read_input(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut player_commands: EventWriter<PlayerCommand>,
 ) {
     if keyboard_input.just_pressed(KeyCode::Space) {
+        bevy::log::info!("Space pressed");
         player_commands.send(PlayerCommand::ToggleReady);
     }
 }
@@ -291,6 +392,8 @@ fn client_send_player_commands(
     mut client: ResMut<RenetClient>,
 ) {
     for command in player_commands.read() {
+        bevy::log::info!("Sending command: {:?}", command);
+
         let command_message = bincode::serialize(command).unwrap();
         client.send_message(ClientChannel::Command, command_message);
     }
@@ -466,7 +569,7 @@ pub fn client_sync_players(
                 if let Some(client_entity) = network_mapping.0.get(&entity) {
                     if let Ok(mut player) = player_data.get_mut(*client_entity) {
                         player.is_ready = is_ready;
-                        println!("SEND EVENT");
+                        bevy::log::info!("Player {:?} is ready: {:?}", client_entity, is_ready);
                         toggles.send(ToggleReadyEvent {
                             player: *client_entity,
                             is_ready,
@@ -475,7 +578,7 @@ pub fn client_sync_players(
                 }
             }
             ServerMessages::StartGame => {
-                println!("Starting game!");
+                bevy::log::info!("Starting game!");
                 next_screen.set(Screen::Gameplay);
             }
         }

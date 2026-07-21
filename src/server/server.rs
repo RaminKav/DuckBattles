@@ -1,19 +1,4 @@
-use std::{
-    collections::HashMap,
-    f32::consts::PI,
-    net::{SocketAddr, UdpSocket},
-    time::SystemTime,
-};
-use warp::Filter;
-
-use bevy::{
-    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
-    prelude::*,
-};
-use bevy_egui::{EguiContexts, EguiPlugin};
-
-use bevy_renet2::prelude::{ClientId, RenetServer, RenetServerPlugin, ServerEvent};
-use chexy_butt_balloons::{
+use crate::{
     demo::{
         animation::FacingDirection,
         client::PLAYER_BASE_COLLIDER_SIZE,
@@ -31,12 +16,35 @@ use chexy_butt_balloons::{
     },
     AppSet,
 };
+use bevy::{
+    app::ScheduleRunnerPlugin,
+    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    input::InputPlugin,
+    prelude::*,
+    state::app::StatesPlugin,
+};
+use bevy_renet2::netcode::NetcodeServerPlugin;
+use bevy_renet2::prelude::{
+    ClientId, ConnectionConfig, RenetServer, RenetServerPlugin, ServerEvent,
+};
+use enfync::AdoptOrDefault;
+use enfync::Handle;
+use std::{
+    collections::HashMap,
+    f32::consts::PI,
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    time::{Duration, SystemTime},
+};
 
 use rand::Rng;
 use renet2_netcode::{
     NativeSocket, ServerAuthentication, ServerCertHash, ServerSetupConfig, WebServerDestination,
 };
-use renet2_visualizer::RenetServerVisualizer;
+use renet2_setup::{
+    setup_combo_renet2_server_in_bevy, ClientCounts, ConnectMetas, ConnectionType,
+    GameServerSetupConfig,
+};
+use serde::Deserialize;
 
 #[derive(Component)]
 pub struct ServerGameObject(pub u64);
@@ -79,35 +87,40 @@ pub struct Projectile {
     pub owner: Entity,
 }
 
-// #[cfg(feature = "netcode")]
-fn setup_udp_server(app: &mut App) {
-    use bevy_renet2::netcode::{
-        NetcodeServerPlugin, NetcodeServerTransport, ServerAuthentication, ServerConfig,
-    };
-    use std::{net::UdpSocket, time::SystemTime};
+// // #[cfg(feature = "netcode")]
+// fn setup_udp_server(app: &mut App) {
+//     println!("Setting up UDP server");
+//     use bevy_renet2::netcode::{
+//         NetcodeServerPlugin, NetcodeServerTransport, ServerAuthentication, ServerConfig,
+//     };
+//     use std::{net::UdpSocket, time::SystemTime};
 
-    app.add_plugins(NetcodeServerPlugin);
+//     app.add_plugins(NetcodeServerPlugin);
 
-    let server = RenetServer::new(connection_config());
+//     let server = RenetServer::new(connection_config());
 
-    let public_addr = "127.0.0.1:5000".parse().unwrap();
-    let socket = UdpSocket::bind(public_addr).unwrap();
-    let current_time: std::time::Duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
-    let server_config = ServerSetupConfig {
-        current_time,
-        max_clients: 64,
-        protocol_id: PROTOCOL_ID,
-        socket_addresses: vec![vec![public_addr]],
-        authentication: ServerAuthentication::Unsecure,
-    };
+//     let public_addr = "0.0.0.0:8080".parse().unwrap();
+//     let socket = UdpSocket::bind(public_addr).unwrap();
+//     let current_time: std::time::Duration = SystemTime::now()
+//         .duration_since(SystemTime::UNIX_EPOCH)
+//         .unwrap();
+//     let server_config = ServerSetupConfig {
+//         current_time,
+//         max_clients: 64,
+//         protocol_id: PROTOCOL_ID,
+//         socket_addresses: vec![vec![public_addr]],
+//         authentication: ServerAuthentication::Unsecure,
+//     };
 
-    let transport =
-        NetcodeServerTransport::new(server_config, NativeSocket::new(socket).unwrap()).unwrap();
-    app.insert_resource(server);
-    app.insert_resource(transport);
-}
+//     let transport =
+//         NetcodeServerTransport::new(server_config, NativeSocket::new(socket).unwrap()).unwrap();
+//     app.insert_resource(server);
+//     app.insert_resource(transport);
+//     println!(
+//         "UDP Server successfully initialized on address: {}",
+//         public_addr
+//     );
+// }
 
 struct ClientConnectionInfo {
     native_addr: String,
@@ -116,181 +129,320 @@ struct ClientConnectionInfo {
     cert_hash: ServerCertHash,
 }
 
-#[cfg(target_family = "wasm")]
-fn setup_wasm_server(app: &mut App) {
-    use renet2_netcode::{
-        BoxedSocket, NativeSocket, NetcodeServerTransport, ServerCertHash, ServerSetupConfig,
-        ServerSocket, WebServerDestination, WebSocketServer, WebSocketServerConfig,
-        WebTransportServer, WebTransportServerConfig,
+fn setup_server(world: &mut World) {
+    println!("Setting up server");
+    let bind_ip = std::env::var("CHEXY_SERVER_BIND_IP")
+        .ok()
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .unwrap_or(IpAddr::from([0, 0, 0, 0]));
+    let public_ip = std::env::var("CHEXY_SERVER_PUBLIC_IP")
+        .ok()
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .unwrap_or_else(|| {
+            if bind_ip.is_unspecified() {
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            } else {
+                bind_ip
+            }
+        });
+    let http_port = std::env::var("CHEXY_SERVER_HTTP_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let native_port = std::env::var("CHEXY_SERVER_NATIVE_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8081);
+    let wasm_wt_port = std::env::var("CHEXY_SERVER_WT_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8082);
+    let wasm_ws_port = std::env::var("CHEXY_SERVER_WS_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8083);
+    let native_port_proxy = std::env::var("CHEXY_SERVER_NATIVE_PORT_PROXY")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
+    let wasm_wt_port_proxy = std::env::var("CHEXY_SERVER_WT_PORT_PROXY")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
+    let wasm_ws_port_proxy = std::env::var("CHEXY_SERVER_WS_PORT_PROXY")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
+    let ws_domain = std::env::var("CHEXY_SERVER_WS_DOMAIN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let has_wss_proxy = std::env::var("CHEXY_SERVER_HAS_WSS_PROXY")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    println!(
+        "Server binding to {bind_ip} (public {public_ip}) http:{http_port} native:{native_port} wt:{wasm_wt_port} ws:{wasm_ws_port}"
+    );
+
+    let config: GameServerSetupConfig = GameServerSetupConfig {
+        protocol_id: PROTOCOL_ID,
+        expire_secs: 100000000u64,
+        timeout_secs: 100000000i32,
+        server_ip: bind_ip,
+        native_port,
+        wasm_wt_port,
+        wasm_ws_port,
+        proxy_ip: Some(public_ip),
+        ws_domain,
+        wss_certs: None,
+        native_port_proxy,
+        wasm_wt_port_proxy,
+        wasm_ws_port_proxy,
+        has_wss_proxy,
     };
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-
-    let http_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
-    let max_clients = 10;
-
-    // Native socket
-    let wildcard_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let native_socket = NativeSocket::new(UdpSocket::bind(wildcard_addr).unwrap()).unwrap();
-
-    // WebTransport socket
-    let (wt_socket, cert_hash) = {
-        let (config, cert_hash) =
-            WebTransportServerConfig::new_selfsigned(wildcard_addr, max_clients).unwrap();
-        (
-            WebTransportServer::new(config, runtime.handle().clone()).unwrap(),
-            cert_hash,
-        )
+    let client_counts: ClientCounts = ClientCounts {
+        memory_clients: vec![],
+        native_count: 16,
+        wasm_wt_count: 16,
+        wasm_ws_count: 16,
     };
 
-    // WebSocket socket
-    let ws_socket = {
-        let config = WebSocketServerConfig::new(wildcard_addr, max_clients);
-        WebSocketServer::new(config, runtime.handle().clone()).unwrap()
-    };
+    let connect_metas =
+        setup_combo_renet2_server_in_bevy(world, config, client_counts, connection_config())
+            .expect("Server failed to start");
 
-    // Save connection info
-    let client_connection_info = ClientConnectionInfo {
-        native_addr: native_socket.addr().unwrap().to_string(),
-        wt_dest: wt_socket.addr().unwrap().into(),
-        ws_url: ws_socket.url(),
-        cert_hash,
-    };
+    let runtime = enfync::builtin::native::TokioHandle::adopt_or_default();
+    runtime.spawn(async move {
+        run_http_server(SocketAddr::new(bind_ip, http_port), connect_metas).await
+    });
+    println!("Server setup complete");
+}
 
-    // Setup netcode server transport
+async fn run_http_server(http_addr: SocketAddr, connect_metas: ConnectMetas) {
+    use warp::Filter;
+
+    let cors = warp::cors()
+        .allow_any_origin()
+        .allow_methods(vec!["POST"])
+        .allow_headers(vec!["Content-Type"]);
+
+    use std::convert::Infallible;
+
+    let auth = warp::post()
+        .and(warp::path("auth"))
+        .and(warp::path::param::<u64>())
+        .and(warp::query::<TokenRequest>().or_else(|_| async move {
+            Ok::<(TokenRequest,), Infallible>((TokenRequest::default(),))
+        }))
+        .map(move |id, request: TokenRequest| token_handler(connect_metas.clone(), id, request))
+        .with(cors);
+
+    warp::serve(auth).run(http_addr).await;
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TokenRequest {
+    transport: Option<String>,
+}
+
+fn parse_connection_type(value: Option<String>) -> ConnectionType {
+    fn parse(value: &str) -> Option<ConnectionType> {
+        match value.to_ascii_lowercase().as_str() {
+            "memory" => Some(ConnectionType::Memory),
+            "native" => Some(ConnectionType::Native),
+            "wasm_wt" | "wasm-wt" => Some(ConnectionType::WasmWt),
+            "wasm_ws" | "wasm-ws" => Some(ConnectionType::WasmWs),
+            _ => None,
+        }
+    }
+
+    value
+        .as_deref()
+        .and_then(parse)
+        .unwrap_or(ConnectionType::WasmWs)
+}
+
+fn token_handler(
+    connect_metas: ConnectMetas,
+    client_id: u64,
+    request: TokenRequest,
+) -> impl warp::Reply {
+    println!(
+        "GOT TOKEN REQUEST {client_id:?} transport={:?}",
+        request.transport
+    );
     let current_time = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
-    let server_config = ServerSetupConfig {
-        current_time,
-        max_clients,
-        protocol_id: 0,
-        socket_addresses: vec![
-            vec![native_socket.addr().unwrap()],
-            vec![wt_socket.addr().unwrap()],
-            vec![ws_socket.addr().unwrap()],
-        ],
-        authentication: ServerAuthentication::Unsecure,
-    };
-    let transport = NetcodeServerTransport::new_with_sockets(
-        server_config,
-        Vec::from([
-            BoxedSocket::new(native_socket),
-            BoxedSocket::new(wt_socket),
-            BoxedSocket::new(ws_socket),
-        ]),
-    )
-    .unwrap();
-    debug!("transport created");
-
-    // Run HTTP server for clients to get connection info.
-    runtime.spawn(async move { run_http_server(http_addr, client_connection_info).await });
-
-    let server = RenetServer::new(connection_config());
-    app.insert_resource(server);
-    app.insert_resource(transport);
+    let connection_type = parse_connection_type(request.transport);
+    let token = connect_metas
+        .new_connect_token(current_time, client_id, connection_type)
+        .unwrap_or_else(|err| panic!("failed to create connect token: {err}"));
+    warp::reply::json(&token)
 }
 
-async fn run_http_server(http_addr: SocketAddr, client_connection_info: ClientConnectionInfo) {
-    let native_addr = client_connection_info.native_addr;
-    let wt_dest = client_connection_info.wt_dest;
-    let ws_url = client_connection_info.ws_url;
-    let cert_hash = client_connection_info.cert_hash;
+// #[cfg(feature = "server")]
+// fn setup_wasm_server(app: &mut App) {
+//     println!("Setting up WASM server");
+//     use renet2_netcode::{
+//         BoxedSocket, NativeSocket, NetcodeServerTransport, ServerCertHash, ServerSetupConfig,
+//         ServerSocket, WebServerDestination, WebSocketServer, WebSocketServerConfig,
+//         WebTransportServer, WebTransportServerConfig,
+//     };
+//     let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    let native = warp::path!("native").map(move || warp::reply::json(&native_addr));
+//     let http_addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+//     let max_clients = 10;
 
-    let cors = warp::cors().allow_any_origin();
-    let wasm = warp::path!("wasm")
-        .map(move || warp::reply::json(&(&wt_dest, &cert_hash, &ws_url)))
-        .with(cors);
+//     // Native socket
+//     let wildcard_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+//     let native_socket = NativeSocket::new(UdpSocket::bind(wildcard_addr).unwrap()).unwrap();
 
-    let routes = warp::get().and(native.or(wasm));
+//     // WebTransport socket
+//     let (wt_socket, cert_hash) = {
+//         let (config, cert_hash) =
+//             WebTransportServerConfig::new_selfsigned(wildcard_addr, max_clients).unwrap();
+//         (
+//             WebTransportServer::new(config, runtime.handle().clone()).unwrap(),
+//             cert_hash,
+//         )
+//     };
 
-    warp::serve(routes).run(http_addr).await;
-}
+//     // WebSocket socket
+//     let ws_socket = {
+//         let config = WebSocketServerConfig::new(wildcard_addr, max_clients);
+//         WebSocketServer::new(config, runtime.handle().clone()).unwrap()
+//     };
 
-fn main() {
-    let mut app = App::new();
+//     // Save connection info
+//     let client_connection_info = ClientConnectionInfo {
+//         native_addr: native_socket.addr().unwrap().to_string(),
+//         wt_dest: wt_socket.addr().unwrap().into(),
+//         ws_url: ws_socket.url(),
+//         cert_hash,
+//     };
 
-    app.add_plugins(DefaultPlugins);
+//     // Setup netcode server transport
+//     let current_time = SystemTime::now()
+//         .duration_since(SystemTime::UNIX_EPOCH)
+//         .unwrap();
+//     let server_config = ServerSetupConfig {
+//         current_time,
+//         max_clients,
+//         protocol_id: 0,
+//         socket_addresses: vec![
+//             vec![native_socket.addr().unwrap()],
+//             vec![wt_socket.addr().unwrap()],
+//             vec![ws_socket.addr().unwrap()],
+//         ],
+//         authentication: ServerAuthentication::Unsecure,
+//     };
+//     let transport = NetcodeServerTransport::new_with_sockets(
+//         server_config,
+//         Vec::from([
+//             BoxedSocket::new(native_socket),
+//             BoxedSocket::new(wt_socket),
+//             BoxedSocket::new(ws_socket),
+//         ]),
+//     )
+//     .unwrap();
+//     debug!("transport created");
 
-    app.add_plugins(RenetServerPlugin);
-    app.add_plugins(FrameTimeDiagnosticsPlugin);
-    app.add_plugins(LogDiagnosticsPlugin::default());
-    app.add_plugins(EguiPlugin);
+//     // Run HTTP server for clients to get connection info.
+//     runtime.spawn(async move { run_http_server(http_addr, client_connection_info).await });
 
-    app.insert_resource(ServerLobby::default());
-    app.insert_resource(BotId(0));
-    app.insert_resource(CoinSpawner {
-        timer: Timer::from_seconds(1.2, TimerMode::Repeating),
-    });
+//     let server = RenetServer::new(connection_config());
+//     app.insert_resource(server);
+//     app.insert_resource(transport);
+//     println!("DONE Setting up WASM server");
+// }
 
-    app.init_state::<Screen>();
-    app.add_systems(Update, handle_score_event);
+pub struct ServerPlugin;
 
-    app.insert_resource(RenetServerVisualizer::<200>::default());
-    app.add_event::<ScoreEvent>();
+impl Plugin for ServerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
+            Duration::from_secs_f64(1.0 / 60.0),
+        )));
+        app.add_plugins((
+            StatesPlugin,
+            InputPlugin,
+            RenetServerPlugin,
+            NetcodeServerPlugin,
+            FrameTimeDiagnosticsPlugin,
+            LogDiagnosticsPlugin::default(),
+        ));
+        // app.add_plugins(EguiPlugin);
 
-    #[cfg(not(target_family = "wasm"))]
-    setup_udp_server(&mut app);
+        app.insert_resource(ServerLobby::default());
+        app.insert_resource(BotId(0));
+        app.insert_resource(CoinSpawner {
+            timer: Timer::from_seconds(1.2, TimerMode::Repeating),
+        });
 
-    #[cfg(target_family = "wasm")]
-    setup_wasm_server(&mut app);
+        app.init_state::<Screen>();
+        app.add_systems(Update, handle_score_event);
 
-    app.add_systems(
-        Update,
-        (
-            server_update_system,
-            server_network_sync,
-            move_players_system,
-            update_visulizer_system,
-            spawn_bot,
-            bot_autocast,
-        ),
-    );
-    app.add_systems(
-        Update,
-        (apply_movement, apply_screen_wrap)
-            .chain()
-            .in_set(AppSet::Update),
-    );
+        app.add_event::<ScoreEvent>();
 
-    app.add_systems(
-        FixedUpdate,
-        (
-            move_projectiles,
-            spawn_coins.run_if(in_state(Screen::Gameplay)),
-        ),
-    );
-    app.add_systems(Startup, generate_world);
+        app.add_systems(Startup, setup_server);
 
-    app.add_systems(
-        PostUpdate,
-        (projectile_on_removal_system, coin_on_removal_system),
-    );
+        app.add_systems(
+            Update,
+            (
+                server_update_system,
+                server_network_sync,
+                move_players_system,
+                spawn_bot,
+                bot_autocast,
+            ),
+        );
+        app.add_systems(
+            Update,
+            (apply_movement, apply_screen_wrap)
+                .chain()
+                .in_set(AppSet::Update),
+        );
 
-    // app.add_systems(Startup, setup_simple_camera);
+        app.add_systems(
+            FixedUpdate,
+            (
+                move_projectiles,
+                spawn_coins.run_if(in_state(Screen::Gameplay)),
+            ),
+        );
+        app.add_systems(Startup, generate_world);
 
-    app.run();
+        app.add_systems(
+            PostUpdate,
+            (projectile_on_removal_system, coin_on_removal_system),
+        );
+
+        // app.add_systems(Startup, setup_simple_camera);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn server_update_system(
     mut server_events: EventReader<ServerEvent>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
     mut lobby: ResMut<ServerLobby>,
     mut server: ResMut<RenetServer>,
-    mut visualizer: ResMut<RenetServerVisualizer<200>>,
     mut players: Query<(Entity, &mut Player, &Transform, &MovementController)>,
     game_objects: Query<(&Transform, &ServerGameObject)>,
     mut next_screen: ResMut<NextState<Screen>>,
 ) {
     for event in server_events.read() {
+        println!("TEST: {:?}", event);
         match event {
             ServerEvent::ClientConnected { client_id } => {
                 println!("Player {} connected.", client_id);
-                visualizer.add_client(*client_id);
 
                 // Initialize other players for this new client
                 for (entity, player, transform, _) in players.iter() {
@@ -340,6 +492,7 @@ fn server_update_system(
                         is_ready: false,
                     })
                     .id();
+                println!("PLAYER ENTITY: {player_entity:?}");
 
                 lobby.players.insert(*client_id, player_entity);
 
@@ -355,7 +508,6 @@ fn server_update_system(
             }
             ServerEvent::ClientDisconnected { client_id, reason } => {
                 println!("Player {} disconnected: {}", client_id, reason);
-                visualizer.remove_client(*client_id);
                 if let Some(player_entity) = lobby.players.remove(client_id) {
                     commands.entity(player_entity).despawn();
                 }
@@ -394,12 +546,8 @@ fn server_update_system(
                                 .translation;
 
                             let projectile_entity = commands
-                                .spawn((
-                                    Mesh2d(meshes.add(Rectangle::new(1.0, 8.0))),
-                                    MeshMaterial2d(materials.add(Color::srgb(1.0, 0.0, 0.0))),
-                                    Transform::from_translation(final_translation)
-                                        .with_rotation(Quat::from_rotation_z(angle)),
-                                ))
+                                .spawn((Transform::from_translation(final_translation)
+                                    .with_rotation(Quat::from_rotation_z(angle)),))
                                 .insert(Collider {
                                     size: Vec2::new(12., 18.),
                                     collides_with_player: true,
@@ -422,9 +570,47 @@ fn server_update_system(
                         }
                     }
                 }
+                PlayerCommand::DebugSpawnBot => {
+                    println!("Received debug spawn bot command from client {}", client_id);
+                    if let Some(player_entity) = lobby.players.get(&client_id) {
+                        if let Ok((_, _, player_transform, _)) = players.get(*player_entity) {
+                            let transform = Transform::from_translation(
+                                SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()]
+                                    .extend(8.),
+                            );
+                            let player_entity = commands
+                                .spawn((transform,))
+                                .insert(Player {
+                                    id: client_id,
+                                    score: 0,
+                                    is_ready: true,
+                                })
+                                .id();
+                            let current_time = SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
+                            lobby.players.insert(current_time, player_entity);
+
+                            let translation: [f32; 3] = transform.translation.into();
+                            let message = bincode::serialize(&ServerMessages::PlayerCreate {
+                                id: client_id,
+                                entity: player_entity,
+                                translation,
+                                is_ready: true,
+                            })
+                            .unwrap();
+                            server.broadcast_message(ServerChannel::ServerMessages, message);
+                        }
+                    }
+                }
                 PlayerCommand::ToggleReady => {
+                    println!("Received toggle ready command from client {}", client_id);
                     if let Some(player_entity) = lobby.players.get_mut(&client_id) {
+                        println!("     -> Got player Entity: {player_entity:?}");
+                        println!("     -> count: {:?}", players.is_empty());
                         if let Ok((_, mut player, _, _)) = players.get_mut(*player_entity) {
+                            println!("          -> Got player Details");
                             player.is_ready = !player.is_ready;
                             println!("Player {} is now {:?}", client_id, player.is_ready);
                             let message = bincode::serialize(&ServerMessages::SetPlayerReady {
@@ -450,6 +636,7 @@ fn server_update_system(
                     }
 
                     if all_players_ready_check {
+                        println!("All players are ready, starting game!");
                         let message = bincode::serialize(&ServerMessages::StartGame).unwrap();
                         server.broadcast_message(ServerChannel::ServerMessages, message);
                         next_screen.set(Screen::Gameplay);
@@ -468,14 +655,14 @@ fn server_update_system(
     }
 }
 
-fn update_visulizer_system(
-    mut egui_contexts: EguiContexts,
-    mut visualizer: ResMut<RenetServerVisualizer<200>>,
-    server: Res<RenetServer>,
-) {
-    visualizer.update(&server);
-    visualizer.show_window(egui_contexts.ctx_mut());
-}
+// fn update_visulizer_system(
+//     mut egui_contexts: EguiContexts,
+//     mut visualizer: ResMut<RenetServerVisualizer<200>>,
+//     server: Res<RenetServer>,
+// ) {
+//     visualizer.update(&server);
+//     visualizer.show_window(egui_contexts.ctx_mut());
+// }
 
 #[allow(clippy::type_complexity)]
 fn server_network_sync(
@@ -608,8 +795,6 @@ fn coin_on_removal_system(
 
 fn spawn_bot(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut lobby: ResMut<ServerLobby>,
     mut server: ResMut<RenetServer>,
     mut bot_id: ResMut<BotId>,
@@ -624,11 +809,7 @@ fn spawn_bot(
             SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()].extend(8.),
         );
         let player_entity = commands
-            .spawn((
-                Mesh3d(meshes.add(Mesh::from(Capsule3d::default()))),
-                MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
-                transform,
-            ))
+            .spawn((transform,))
             .insert(Player {
                 id: client_id,
                 score: 0,

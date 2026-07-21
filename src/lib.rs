@@ -6,29 +6,32 @@ mod dev_tools;
 pub mod screens;
 mod theme;
 
-use std::time::Duration;
+#[cfg(feature = "server")]
+pub mod server;
+#[cfg(feature = "server")]
+pub use server::*;
 
 use bevy::{
     asset::AssetMetaCheck,
     audio::{AudioPlugin, Volume},
-    log::LogPlugin,
     prelude::*,
     window::WindowMode,
 };
 use bevy_mod_reqwest::ReqwestPlugin;
-use demo::player::PlayerAssets;
+use demo::{client::ClientNetworkConfig, player::PlayerAssets};
 use screens::Screen;
-use serde::{Deserialize, Serialize};
 
-pub struct AppPlugin;
+pub struct ClientPlugin;
 
-impl Plugin for AppPlugin {
+impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         // Order new `AppStep` variants by adding them here:
         app.configure_sets(
             Update,
             (AppSet::TickTimers, AppSet::RecordInput, AppSet::Update).chain(),
         );
+
+        app.insert_resource(ClientNetworkConfig::default());
 
         // Spawn the main camera.
         app.add_systems(Startup, spawn_camera);
@@ -74,8 +77,8 @@ impl Plugin for AppPlugin {
         ));
 
         // Enable dev tools for dev builds.
-        #[cfg(feature = "dev")]
-        app.add_plugins(dev_tools::plugin);
+        // #[cfg(feature = "dev")]
+        // app.add_plugins(dev_tools::plugin);
     }
 }
 
