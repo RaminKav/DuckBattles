@@ -80,20 +80,27 @@ pub fn apply_movement(
 
     'outer: for (entity, mover_transform, mover_collider, movement_this_frame) in movement_data {
         let mut mover_mask = Vec3::ONE;
+        // Feet/body offset used for player collision checks.
+        let body_pos = mover_transform.translation - Vec3::new(0., 10., 0.);
         for (collider_entity, collider_transform, collider, maybe_coin) in colliders.iter_mut() {
             if collider_entity == entity {
                 // Don't check collision with self.
                 continue;
             }
-            if collider.collides_with_player
-                && check_collision(
-                    &(mover_transform.translation - Vec3::new(0., 10., 0.)
-                        + movement_this_frame * Vec3::new(1., 0., 1.)),
-                    &mover_collider,
-                    &collider_transform.translation,
-                    collider,
-                )
-            {
+            if !collider.collides_with_player {
+                continue;
+            }
+
+            let wall_pos = collider_transform.translation;
+            let already_inside =
+                check_collision(&body_pos, &mover_collider, &wall_pos, collider);
+
+            if check_collision(
+                &(body_pos + movement_this_frame * Vec3::new(1., 0., 1.)),
+                &mover_collider,
+                &wall_pos,
+                collider,
+            ) {
                 if maybe_coin.is_some() {
                     score_event.send(ScoreEvent {
                         player: entity,
@@ -101,20 +108,18 @@ pub fn apply_movement(
                     });
                     commands.entity(collider_entity).despawn();
                     continue;
-                } else {
+                } else if !already_inside {
+                    // Only block when approaching from outside; allow escape if stuck inside.
                     mover_mask.x = 0.;
                 }
             }
 
-            if collider.collides_with_player
-                && check_collision(
-                    &(mover_transform.translation - Vec3::new(0., 10., 0.)
-                        + movement_this_frame * Vec3::new(0., 1., 1.)),
-                    &mover_collider,
-                    &collider_transform.translation,
-                    collider,
-                )
-            {
+            if check_collision(
+                &(body_pos + movement_this_frame * Vec3::new(0., 1., 1.)),
+                &mover_collider,
+                &wall_pos,
+                collider,
+            ) {
                 if maybe_coin.is_some() {
                     score_event.send(ScoreEvent {
                         player: entity,
@@ -122,7 +127,7 @@ pub fn apply_movement(
                     });
                     commands.entity(collider_entity).despawn();
                     continue;
-                } else {
+                } else if !already_inside {
                     mover_mask.y = 0.;
                 }
             }

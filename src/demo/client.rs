@@ -6,7 +6,9 @@ use crate::demo::animation::{FacingDirection, PlayerAnimation};
 
 use crate::demo::lib::connection_config;
 use crate::demo::physics::Collider;
-use crate::screens::gameplay::{calculate_score_growth, ScoreText};
+use crate::screens::gameplay::{
+    calculate_score_growth, COIN_COLLIDER_SIZE, COIN_SCALE, ScoreText,
+};
 use crate::screens::lobby::ToggleReadyEvent;
 use crate::screens::Screen;
 use bevy::{
@@ -22,26 +24,26 @@ use bevy_renet2::prelude::{client_connected, ClientId, RenetClient, RenetClientP
 use renet2_setup::{setup_renet2_client, ClientConnectPack, ConnectionType, ServerConnectToken};
 
 use super::lib::{
-    ClientChannel, NetworkedEntities, Player, PlayerCommand, PlayerInput, ServerChannel,
-    ServerMessages, PROTOCOL_ID,
+    player_color_tint, ClientChannel, MatchResults, NetworkedEntities, PendingSessionTeardown,
+    Player, PlayerCommand, PlayerInput, ServerChannel, ServerMessages, PROTOCOL_ID,
 };
 use super::player::PlayerAssets;
 
 #[derive(Component)]
-struct ControlledPlayer;
+pub struct ControlledPlayer;
 
 #[derive(Default, Resource)]
-pub struct NetworkMapping(HashMap<Entity, Entity>);
-
-#[derive(Debug)]
-struct PlayerInfo {
-    client_entity: Entity,
-    server_entity: Entity,
-}
+pub struct NetworkMapping(pub HashMap<Entity, Entity>);
 
 #[derive(Debug, Default, Resource)]
 pub struct ClientLobby {
-    players: HashMap<ClientId, PlayerInfo>,
+    pub players: HashMap<ClientId, PlayerInfo>,
+}
+
+#[derive(Debug)]
+pub struct PlayerInfo {
+    pub client_entity: Entity,
+    pub server_entity: Entity,
 }
 
 #[derive(Debug, Resource)]
@@ -105,6 +107,10 @@ impl ClientNetworkConfig {
             self.auth_base_url.trim_end_matches('/'),
             Self::transport_slug(self.connection_type)
         )
+    }
+
+    pub fn status_endpoint(&self) -> String {
+        format!("{}/status", self.auth_base_url.trim_end_matches('/'))
     }
 }
 
@@ -327,6 +333,7 @@ pub(super) fn plugins(app: &mut App) {
     app.insert_resource(ClientLobby::default());
     app.insert_resource(PlayerInput::default());
     app.insert_resource(NetworkMapping::default());
+    app.insert_resource(MatchTimeRemaining(60));
 
     app.add_systems(Update, (player_input).run_if(in_state(Screen::Gameplay)));
     app.add_systems(Update, (debug_player_input));
@@ -337,13 +344,26 @@ pub(super) fn plugins(app: &mut App) {
         (
             client_send_input,
             update_score_text,
+            update_match_timer_text,
             client_send_player_commands,
             client_sync_players,
         )
             .in_set(Connected),
     );
+    app.add_systems(Update, apply_pending_session_teardown);
     app.add_systems(OnEnter(Screen::Lobby), setup_client_fr);
+    app.add_systems(OnEnter(Screen::Gameplay), spawn_match_timer_ui);
 }
+
+/// Marker for client-side world props synced from the server (walls, trees, etc.).
+#[derive(Component)]
+pub(crate) struct ClientWorldObject;
+
+#[derive(Resource, Default)]
+pub struct MatchTimeRemaining(pub u16);
+
+#[derive(Component)]
+struct MatchTimerText;
 
 fn player_input(
     keyboard_input: Res<ButtonInput<KeyCode>>,
@@ -412,6 +432,8 @@ pub fn client_sync_players(
     mut player_data: Query<&mut Player>,
     mut toggles: EventWriter<ToggleReadyEvent>,
     mut next_screen: ResMut<NextState<Screen>>,
+    world_objects: Query<Entity, With<ClientWorldObject>>,
+    mut match_time: ResMut<MatchTimeRemaining>,
 ) {
     let client_id = client_id.0;
     while let Some(message) = client.receive_message(ServerChannel::ServerMessages) {
@@ -422,6 +444,7 @@ pub fn client_sync_players(
                 translation,
                 entity,
                 is_ready,
+                color,
             } => {
                 println!("Player {} connected.", id);
                 let layout = TextureAtlasLayout::from_grid(
@@ -440,6 +463,7 @@ pub fn client_sync_players(
                         id,
                         score: 0,
                         is_ready,
+                        color,
                     },
                     Sprite {
                         image: player_assets.ducky.clone(),
@@ -447,6 +471,7 @@ pub fn client_sync_players(
                             layout: texture_atlas_layout.clone(),
                             index: player_animation.get_atlas_index(),
                         }),
+                        color: player_color_tint(color),
                         ..default()
                     },
                     Collider {
@@ -495,6 +520,7 @@ pub fn client_sync_players(
                 ];
                 commands.spawn((
                     Name::new("Dirt"),
+                    ClientWorldObject,
                     Sprite {
                         image: match id {
                             0 => player_assets.dirt_patch.clone(),
@@ -550,12 +576,13 @@ pub fn client_sync_players(
                         ..default()
                     },
                     Collider {
-                        size: Vec2::new(20., 24.),
+                        size: COIN_COLLIDER_SIZE,
                         collides_with_player: true,
                         collides_with_projectile: false,
                     },
                     Transform::from_translation(translation.into())
-                        .with_scale(Vec3::new(1.5, 1.5, 1.)),
+                        .with_scale(Vec3::new(COIN_SCALE, COIN_SCALE, 1.)),
+                    StateScoped(Screen::Gameplay),
                 ));
 
                 network_mapping.0.insert(entity, coin_entity.id());
@@ -579,7 +606,35 @@ pub fn client_sync_players(
             }
             ServerMessages::StartGame => {
                 bevy::log::info!("Starting game!");
+                match_time.0 = 60;
                 next_screen.set(Screen::Gameplay);
+            }
+            ServerMessages::ReturnToTitle => {
+                bevy::log::info!("Server reset — returning to title");
+                let world_ents: Vec<Entity> = world_objects.iter().collect();
+                clear_client_session(
+                    &mut commands,
+                    &mut lobby,
+                    &mut network_mapping,
+                    &world_ents,
+                );
+                next_screen.set(Screen::Title);
+                commands.insert_resource(PendingSessionTeardown);
+            }
+            ServerMessages::MatchTimer { remaining_secs } => {
+                match_time.0 = remaining_secs;
+            }
+            ServerMessages::MatchEnded { rankings } => {
+                bevy::log::info!("Match ended — showing leaderboard");
+                let world_ents: Vec<Entity> = world_objects.iter().collect();
+                clear_client_session(
+                    &mut commands,
+                    &mut lobby,
+                    &mut network_mapping,
+                    &world_ents,
+                );
+                commands.insert_resource(MatchResults { rankings });
+                next_screen.set(Screen::Results);
             }
         }
     }
@@ -624,4 +679,78 @@ fn update_score_text(
 
         text.0 = format!("Coins: {}", player.score);
     }
+}
+
+fn spawn_match_timer_ui(
+    mut commands: Commands,
+    existing: Query<Entity, With<MatchTimerText>>,
+    remaining: Res<MatchTimeRemaining>,
+) {
+    if !existing.is_empty() {
+        return;
+    }
+    commands
+        .spawn((
+            Name::new("Match Timer Root"),
+            StateScoped(Screen::Gameplay),
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(12.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::FlexStart,
+                ..default()
+            },
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Name::new("Match Timer"),
+                MatchTimerText,
+                Text::new(format!("{}", remaining.0)),
+                TextFont::from_font_size(48.0),
+                TextColor(Color::srgb(0.95, 0.15, 0.12)),
+                TextLayout::new_with_justify(JustifyText::Center),
+            ));
+        });
+}
+
+fn update_match_timer_text(
+    remaining: Res<MatchTimeRemaining>,
+    mut timer_text: Query<&mut Text, With<MatchTimerText>>,
+) {
+    if !remaining.is_changed() {
+        return;
+    }
+    for mut text in &mut timer_text {
+        text.0 = format!("{}", remaining.0);
+    }
+}
+
+fn clear_client_session(
+    commands: &mut Commands,
+    lobby: &mut ClientLobby,
+    network_mapping: &mut NetworkMapping,
+    world_objects: &[Entity],
+) {
+    for info in lobby.players.values() {
+        commands.entity(info.client_entity).despawn_recursive();
+    }
+    lobby.players.clear();
+    network_mapping.0.clear();
+    for entity in world_objects {
+        commands.entity(*entity).despawn_recursive();
+    }
+}
+
+fn apply_pending_session_teardown(
+    mut commands: Commands,
+    pending: Option<Res<PendingSessionTeardown>>,
+) {
+    if pending.is_none() {
+        return;
+    }
+    commands.remove_resource::<PendingSessionTeardown>();
+    commands.remove_resource::<RenetClient>();
+    commands.remove_resource::<NetcodeClientTransport>();
+    commands.remove_resource::<CurrentClientId>();
 }

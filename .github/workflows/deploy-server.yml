@@ -64,6 +64,9 @@ jobs:
               -e CHEXY_SERVER_NATIVE_PORT=8081 \
               -e CHEXY_SERVER_WT_PORT=8082 \
               -e CHEXY_SERVER_WS_PORT=8083 \
+              -e CHEXY_SERVER_WS_DOMAIN=api.duckbattles.com \
+              -e CHEXY_SERVER_HAS_WSS_PROXY=true \
+              -e CHEXY_SERVER_WS_PORT_PROXY=443 \
               -p 8080:8080 \
               -p 8081:8081/udp \
               -p 8082:8082 \

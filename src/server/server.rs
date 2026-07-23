@@ -3,8 +3,9 @@ use crate::{
         animation::FacingDirection,
         client::PLAYER_BASE_COLLIDER_SIZE,
         lib::{
-            connection_config, ClientChannel, NetworkedEntities, Player, PlayerCommand,
-            PlayerInput, ServerChannel, ServerMessages, Velocity, PROTOCOL_ID,
+            connection_config, ClientChannel, LeaderboardEntry, NetworkedEntities, Player,
+            PlayerCommand, PlayerInput, PublicServerStatus, ServerChannel, ServerMessages,
+            ServerPhase, Velocity, MAX_PLAYERS, PLAYER_COLOR_COUNT, PROTOCOL_ID,
         },
         movement::{apply_movement, apply_screen_wrap, MovementController},
         physics::{check_collision, Collider},
@@ -33,6 +34,7 @@ use std::{
     collections::HashMap,
     f32::consts::PI,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -60,6 +62,9 @@ pub struct CoinSpawner {
 
 const PLAYER_MOVE_SPEED: f32 = 300.0;
 const PROJECTILE_MOVE_SPEED: f32 = 500.0;
+const MATCH_DURATION_SECS: f32 = 60.0;
+/// Delay so ReturnToTitle / MatchEnded reach clients before sockets close.
+const DISCONNECT_DELAY_SECS: f32 = 0.35;
 const SPAWN_POSITIONS: [Vec2; 8] = [
     Vec2::new(-250., 0.),
     Vec2::new(250., 0.),
@@ -78,6 +83,27 @@ struct Bot {
 
 #[derive(Debug, Resource)]
 struct BotId(u64);
+
+#[derive(Debug, Resource)]
+struct MatchClock {
+    remaining: f32,
+    last_broadcast_secs: u16,
+}
+
+#[derive(Debug, Resource)]
+struct PendingDisconnectAll {
+    timer: Timer,
+}
+
+/// Shared with the HTTP task so the main menu can poll lobby/match status.
+#[derive(Resource, Clone)]
+struct SharedServerStatus(Arc<Mutex<PublicServerStatus>>);
+
+impl SharedServerStatus {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(PublicServerStatus::default())))
+    }
+}
 
 #[derive(Component, Debug, Clone, Copy, Reflect)]
 #[reflect(Component)]
@@ -217,19 +243,29 @@ fn setup_server(world: &mut World) {
         setup_combo_renet2_server_in_bevy(world, config, client_counts, connection_config())
             .expect("Server failed to start");
 
+    let status = world.resource::<SharedServerStatus>().0.clone();
     let runtime = enfync::builtin::native::TokioHandle::adopt_or_default();
     runtime.spawn(async move {
-        run_http_server(SocketAddr::new(bind_ip, http_port), connect_metas).await
+        run_http_server(
+            SocketAddr::new(bind_ip, http_port),
+            connect_metas,
+            status,
+        )
+        .await
     });
     println!("Server setup complete");
 }
 
-async fn run_http_server(http_addr: SocketAddr, connect_metas: ConnectMetas) {
+async fn run_http_server(
+    http_addr: SocketAddr,
+    connect_metas: ConnectMetas,
+    status: Arc<Mutex<PublicServerStatus>>,
+) {
     use warp::Filter;
 
     let cors = warp::cors()
         .allow_any_origin()
-        .allow_methods(vec!["POST"])
+        .allow_methods(vec!["GET", "POST", "OPTIONS"])
         .allow_headers(vec!["Content-Type"]);
 
     use std::convert::Infallible;
@@ -240,10 +276,22 @@ async fn run_http_server(http_addr: SocketAddr, connect_metas: ConnectMetas) {
         .and(warp::query::<TokenRequest>().or_else(|_| async move {
             Ok::<(TokenRequest,), Infallible>((TokenRequest::default(),))
         }))
-        .map(move |id, request: TokenRequest| token_handler(connect_metas.clone(), id, request))
-        .with(cors);
+        .map(move |id, request: TokenRequest| token_handler(connect_metas.clone(), id, request));
 
-    warp::serve(auth).run(http_addr).await;
+    let status_state = status.clone();
+    let status_route = warp::get()
+        .and(warp::path("status"))
+        .and(warp::path::end())
+        .map(move || {
+            let snapshot = status_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            warp::reply::json(&snapshot)
+        });
+
+    let routes = auth.or(status_route).with(cors);
+    warp::serve(routes).run(http_addr).await;
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -385,6 +433,7 @@ impl Plugin for ServerPlugin {
         app.insert_resource(CoinSpawner {
             timer: Timer::from_seconds(1.2, TimerMode::Repeating),
         });
+        app.insert_resource(SharedServerStatus::new());
 
         app.init_state::<Screen>();
         app.add_systems(Update, handle_score_event);
@@ -397,6 +446,11 @@ impl Plugin for ServerPlugin {
             Update,
             (
                 server_update_system,
+                tick_match_clock
+                    .run_if(in_state(Screen::Gameplay))
+                    .run_if(resource_exists::<MatchClock>),
+                tick_pending_disconnect_all,
+                publish_server_status,
                 server_network_sync,
                 move_players_system,
                 spawn_bot,
@@ -435,7 +489,9 @@ fn server_update_system(
     mut lobby: ResMut<ServerLobby>,
     mut server: ResMut<RenetServer>,
     mut players: Query<(Entity, &mut Player, &Transform, &MovementController)>,
-    game_objects: Query<(&Transform, &ServerGameObject)>,
+    game_objects: Query<(Entity, &Transform, &ServerGameObject)>,
+    coins_query: Query<Entity, With<Coin>>,
+    projectiles_query: Query<Entity, With<Projectile>>,
     mut next_screen: ResMut<NextState<Screen>>,
 ) {
     for event in server_events.read() {
@@ -452,13 +508,14 @@ fn server_update_system(
                         entity,
                         translation,
                         is_ready: player.is_ready,
+                        color: player.color,
                     })
                     .unwrap();
                     server.send_message(*client_id, ServerChannel::ServerMessages, message);
                 }
 
                 // Initialize game objects for this player
-                for (transform, id) in game_objects.iter() {
+                for (_entity, transform, id) in game_objects.iter() {
                     let translation: [f32; 3] = transform.translation.into();
                     let message = bincode::serialize(&ServerMessages::SpawnGameObject {
                         id: id.0,
@@ -468,6 +525,7 @@ fn server_update_system(
                     server.send_message(*client_id, ServerChannel::ServerMessages, message);
                 }
                 // Spawn new player
+                let color = (lobby.players.len() % PLAYER_COLOR_COUNT) as u8;
                 let transform = Transform::from_translation(
                     SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()].extend(8.),
                 );
@@ -490,6 +548,7 @@ fn server_update_system(
                         id: *client_id,
                         score: 0,
                         is_ready: false,
+                        color,
                     })
                     .id();
                 println!("PLAYER ENTITY: {player_entity:?}");
@@ -502,6 +561,7 @@ fn server_update_system(
                     entity: player_entity,
                     translation,
                     is_ready: false,
+                    color,
                 })
                 .unwrap();
                 server.broadcast_message(ServerChannel::ServerMessages, message);
@@ -574,6 +634,7 @@ fn server_update_system(
                     println!("Received debug spawn bot command from client {}", client_id);
                     if let Some(player_entity) = lobby.players.get(&client_id) {
                         if let Ok((_, _, player_transform, _)) = players.get(*player_entity) {
+                            let color = (lobby.players.len() % PLAYER_COLOR_COUNT) as u8;
                             let transform = Transform::from_translation(
                                 SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()]
                                     .extend(8.),
@@ -584,6 +645,7 @@ fn server_update_system(
                                     id: client_id,
                                     score: 0,
                                     is_ready: true,
+                                    color,
                                 })
                                 .id();
                             let current_time = SystemTime::now()
@@ -598,6 +660,7 @@ fn server_update_system(
                                 entity: player_entity,
                                 translation,
                                 is_ready: true,
+                                color,
                             })
                             .unwrap();
                             server.broadcast_message(ServerChannel::ServerMessages, message);
@@ -639,8 +702,25 @@ fn server_update_system(
                         println!("All players are ready, starting game!");
                         let message = bincode::serialize(&ServerMessages::StartGame).unwrap();
                         server.broadcast_message(ServerChannel::ServerMessages, message);
+                        start_match_clock(&mut commands, &mut server);
                         next_screen.set(Screen::Gameplay);
                     }
+                }
+                PlayerCommand::ResetServer => {
+                    println!("Received reset server command from client {}", client_id);
+                    let message = bincode::serialize(&ServerMessages::ReturnToTitle).unwrap();
+                    server.broadcast_message(ServerChannel::ServerMessages, message);
+
+                    reset_server_world(
+                        &mut commands,
+                        &mut lobby,
+                        &players,
+                        &coins_query,
+                        &projectiles_query,
+                        &game_objects,
+                        &mut next_screen,
+                    );
+                    schedule_disconnect_all(&mut commands);
                 }
             }
         }
@@ -805,6 +885,7 @@ fn spawn_bot(
         bot_id.0 += 1;
         // Spawn new player
 
+        let color = (lobby.players.len() % PLAYER_COLOR_COUNT) as u8;
         let transform = Transform::from_translation(
             SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()].extend(8.),
         );
@@ -814,6 +895,7 @@ fn spawn_bot(
                 id: client_id,
                 score: 0,
                 is_ready: true,
+                color,
             })
             .insert(Bot {
                 auto_cast: Timer::from_seconds(1.0, TimerMode::Repeating),
@@ -828,6 +910,7 @@ fn spawn_bot(
             entity: player_entity,
             translation,
             is_ready: true,
+            color,
         })
         .unwrap();
         server.broadcast_message(ServerChannel::ServerMessages, message);
@@ -882,7 +965,156 @@ fn bot_autocast(
     }
 }
 
+fn start_match_clock(commands: &mut Commands, server: &mut RenetServer) {
+    let secs = MATCH_DURATION_SECS as u16;
+    commands.insert_resource(MatchClock {
+        remaining: MATCH_DURATION_SECS,
+        last_broadcast_secs: secs,
+    });
+    let message = bincode::serialize(&ServerMessages::MatchTimer {
+        remaining_secs: secs,
+    })
+    .unwrap();
+    server.broadcast_message(ServerChannel::ServerMessages, message);
+}
+
+fn schedule_disconnect_all(commands: &mut Commands) {
+    commands.insert_resource(PendingDisconnectAll {
+        timer: Timer::from_seconds(DISCONNECT_DELAY_SECS, TimerMode::Once),
+    });
+}
+
+fn reset_server_world(
+    commands: &mut Commands,
+    lobby: &mut ServerLobby,
+    players: &Query<(Entity, &mut Player, &Transform, &MovementController)>,
+    coins_query: &Query<Entity, With<Coin>>,
+    projectiles_query: &Query<Entity, With<Projectile>>,
+    game_objects: &Query<(Entity, &Transform, &ServerGameObject)>,
+    next_screen: &mut NextState<Screen>,
+) {
+    for entity in players.iter().map(|(entity, _, _, _)| entity).collect::<Vec<_>>() {
+        commands.entity(entity).despawn_recursive();
+    }
+    for entity in coins_query.iter().collect::<Vec<_>>() {
+        commands.entity(entity).despawn_recursive();
+    }
+    for entity in projectiles_query.iter().collect::<Vec<_>>() {
+        commands.entity(entity).despawn_recursive();
+    }
+    for entity in game_objects.iter().map(|(entity, _, _)| entity).collect::<Vec<_>>() {
+        commands.entity(entity).despawn_recursive();
+    }
+
+    lobby.players.clear();
+    commands.remove_resource::<MatchClock>();
+    next_screen.set(Screen::Lobby);
+    spawn_world_objects(commands);
+    println!("Server world reset — walls regenerated");
+}
+
+fn tick_match_clock(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut clock: ResMut<MatchClock>,
+    mut server: ResMut<RenetServer>,
+    mut lobby: ResMut<ServerLobby>,
+    players: Query<(Entity, &mut Player, &Transform, &MovementController)>,
+    coins_query: Query<Entity, With<Coin>>,
+    projectiles_query: Query<Entity, With<Projectile>>,
+    game_objects: Query<(Entity, &Transform, &ServerGameObject)>,
+    mut next_screen: ResMut<NextState<Screen>>,
+) {
+    clock.remaining = (clock.remaining - time.delta_secs()).max(0.0);
+    let secs_left = clock.remaining.ceil() as u16;
+
+    if secs_left != clock.last_broadcast_secs {
+        clock.last_broadcast_secs = secs_left;
+        let message = bincode::serialize(&ServerMessages::MatchTimer {
+            remaining_secs: secs_left,
+        })
+        .unwrap();
+        server.broadcast_message(ServerChannel::ServerMessages, message);
+    }
+
+    if clock.remaining > 0.0 {
+        return;
+    }
+
+    let mut rankings: Vec<LeaderboardEntry> = players
+        .iter()
+        .map(|(_, player, _, _)| LeaderboardEntry {
+            client_id: player.id,
+            score: player.score,
+            color: player.color,
+        })
+        .collect();
+    rankings.sort_by(|a, b| b.score.cmp(&a.score));
+
+    println!("Match ended — rankings: {rankings:?}");
+    let message = bincode::serialize(&ServerMessages::MatchEnded { rankings }).unwrap();
+    server.broadcast_message(ServerChannel::ServerMessages, message);
+
+    reset_server_world(
+        &mut commands,
+        &mut lobby,
+        &players,
+        &coins_query,
+        &projectiles_query,
+        &game_objects,
+        &mut next_screen,
+    );
+    schedule_disconnect_all(&mut commands);
+}
+
+fn tick_pending_disconnect_all(
+    mut commands: Commands,
+    time: Res<Time>,
+    pending: Option<ResMut<PendingDisconnectAll>>,
+    mut server: ResMut<RenetServer>,
+) {
+    let Some(mut pending) = pending else {
+        return;
+    };
+    if pending.timer.tick(time.delta()).just_finished() {
+        println!("Disconnecting all clients after reset flush");
+        server.disconnect_all();
+        commands.remove_resource::<PendingDisconnectAll>();
+    }
+}
+
+fn publish_server_status(
+    shared: Res<SharedServerStatus>,
+    lobby: Res<ServerLobby>,
+    screen: Res<State<Screen>>,
+    match_clock: Option<Res<MatchClock>>,
+) {
+    let phase = if *screen.get() == Screen::Gameplay {
+        ServerPhase::Match
+    } else {
+        ServerPhase::Lobby
+    };
+    let remaining_secs = match_clock.map(|clock| clock.remaining.ceil() as u16);
+    let snapshot = PublicServerStatus {
+        phase,
+        players: lobby.players.len(),
+        max_players: MAX_PLAYERS,
+        remaining_secs: if phase == ServerPhase::Match {
+            remaining_secs
+        } else {
+            None
+        },
+    };
+    if let Ok(mut guard) = shared.0.lock() {
+        *guard = snapshot;
+    }
+}
+
 fn generate_world(mut commands: Commands) {
+    spawn_world_objects(&mut commands);
+}
+
+fn spawn_world_objects(commands: &mut Commands) {
     let obj_collider_sizes = [Vec2::new(0., 0.), Vec2::new(110., 80.), Vec2::new(26., 30.)];
     let dirt_patches = [
         Vec3::new(-250., 0., 2.),
@@ -953,14 +1185,11 @@ fn generate_world(mut commands: Commands) {
         Vec3::new(-212., -212., 3.),
         Vec3::new(212., -212., 3.),
     ];
+    // Keep walls clear of player spawn pads so ducks don't start inside colliders.
+    const SPAWN_CLEAR_RADIUS: f32 = 100.0;
     println!("SPAWNING WALLS");
     for i in 0..num_walls {
         let mut rng = rand::thread_rng();
-
-        // Generate a random distance greater than the minimum radius (e.g., 250)
-        let x_offset = rng.gen_range(1.0..2.5); // You can adjust the upper bound here
-        let y_offset = rng.gen_range(1.0..1.4); // You can adjust the upper bound here
-        let pos = wall_base_pos[i] * Vec3::new(x_offset, y_offset, 1.);
         let wall_type = rng.gen_range(0..=3);
         let size = match wall_type {
             0 => Vec2::new(64., 48.),
@@ -968,12 +1197,39 @@ fn generate_world(mut commands: Commands) {
             2 => Vec2::new(32., 80.),
             _ => Vec2::new(32., 114.),
         };
+        let collider_size = size * 1.5;
+        let half = collider_size / 2.0;
+
+        let mut pos = None;
+        for _ in 0..24 {
+            let x_offset = rng.gen_range(1.0..2.5);
+            let y_offset = rng.gen_range(1.0..1.4);
+            let candidate = wall_base_pos[i] * Vec3::new(x_offset, y_offset, 1.);
+            let overlaps_spawn = SPAWN_POSITIONS.iter().any(|spawn| {
+                let dx = (candidate.x - spawn.x).abs();
+                let dy = (candidate.y - spawn.y).abs();
+                dx < half.x + SPAWN_CLEAR_RADIUS && dy < half.y + SPAWN_CLEAR_RADIUS
+            });
+            if !overlaps_spawn {
+                pos = Some(candidate);
+                break;
+            }
+        }
+        let pos = pos.unwrap_or_else(|| {
+            // Last resort: push outward from the origin so walls stay off spawn pads.
+            let dir = wall_base_pos[i]
+                .truncate()
+                .normalize_or_zero();
+            let distance = 420.0 + half.x.max(half.y);
+            (dir * distance).extend(wall_base_pos[i].z)
+        });
+
         commands.spawn((
             Name::new("Wall"),
             Transform::from_translation(pos).with_scale(Vec3::new(1.5, 1.5, 1.)),
             StateScoped(Screen::Gameplay),
             Collider {
-                size: size * 1.5,
+                size: collider_size,
                 collides_with_player: true,
                 collides_with_projectile: true,
             },

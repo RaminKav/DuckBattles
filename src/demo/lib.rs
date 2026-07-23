@@ -14,12 +14,80 @@ pub const PRIVATE_KEY: &[u8; bevy_renet2::netcode::NETCODE_KEY_BYTES] =
                                          // #[cfg(feature = "netcode")]
 pub const PROTOCOL_ID: u64 = 7;
 
+/// Preset duck tints (slot 0 = natural yellow / no tint).
+pub const PLAYER_COLOR_COUNT: usize = 8;
+/// Max concurrent players (matches spawn slots / color count).
+pub const MAX_PLAYERS: usize = PLAYER_COLOR_COUNT;
+
+/// Public lobby/match snapshot served at `GET /status` for the main menu.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicServerStatus {
+    pub phase: ServerPhase,
+    pub players: usize,
+    pub max_players: usize,
+    pub remaining_secs: Option<u16>,
+}
+
+impl Default for PublicServerStatus {
+    fn default() -> Self {
+        Self {
+            phase: ServerPhase::Lobby,
+            players: 0,
+            max_players: MAX_PLAYERS,
+            remaining_secs: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerPhase {
+    Lobby,
+    Match,
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 #[reflect(Component)]
 pub struct Player {
     pub id: ClientId,
     pub score: i64,
     pub is_ready: bool,
+    /// Index into [`player_color_name`] / [`player_color_tint`] (0..=7).
+    pub color: u8,
+}
+
+pub fn player_color_name(slot: u8) -> &'static str {
+    match slot % PLAYER_COLOR_COUNT as u8 {
+        0 => "Yellow",
+        1 => "Red",
+        2 => "Blue",
+        3 => "Green",
+        4 => "Orange",
+        5 => "Purple",
+        6 => "Pink",
+        _ => "Cyan",
+    }
+}
+
+pub fn player_color_tint(slot: u8) -> Color {
+    match slot % PLAYER_COLOR_COUNT as u8 {
+        0 => Color::WHITE, // no tint — base duck yellow
+        1 => Color::srgb(1.0, 0.25, 0.25),
+        2 => Color::srgb(0.25, 0.45, 1.0),
+        3 => Color::srgb(0.25, 0.9, 0.35),
+        4 => Color::srgb(1.0, 0.55, 0.1),
+        5 => Color::srgb(0.7, 0.3, 1.0),
+        6 => Color::srgb(1.0, 0.45, 0.75),
+        _ => Color::srgb(0.2, 0.9, 0.95),
+    }
+}
+
+/// UI-friendly color (Yellow uses a visible gold instead of white).
+pub fn player_color_label(slot: u8) -> Color {
+    match slot % PLAYER_COLOR_COUNT as u8 {
+        0 => Color::srgb(0.95, 0.85, 0.2),
+        other => player_color_tint(other),
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, Component, Resource)]
@@ -35,6 +103,8 @@ pub enum PlayerCommand {
     BasicAttack,
     ToggleReady,
     DebugSpawnBot,
+    /// Ask the server to reset the match and disconnect everyone to the title screen.
+    ResetServer,
 }
 pub enum ClientChannel {
     Input,
@@ -55,6 +125,7 @@ pub enum ServerMessages {
         id: ClientId,
         translation: [f32; 3],
         is_ready: bool,
+        color: u8,
     },
     SpawnGameObject {
         id: u64,
@@ -80,6 +151,33 @@ pub enum ServerMessages {
         is_ready: bool,
     },
     StartGame,
+    /// Server is resetting; clients should return to the title screen.
+    ReturnToTitle,
+    /// Authoritative match countdown (whole seconds remaining).
+    MatchTimer {
+        remaining_secs: u16,
+    },
+    /// Match over — show leaderboard then return to menu.
+    MatchEnded {
+        rankings: Vec<LeaderboardEntry>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardEntry {
+    pub client_id: ClientId,
+    pub score: i64,
+    pub color: u8,
+}
+
+/// Cleared on the next frame: drops the Renet client session after leaving a match.
+#[derive(Resource)]
+pub struct PendingSessionTeardown;
+
+/// Authoritative post-match rankings for the results screen.
+#[derive(Resource, Clone, Debug)]
+pub struct MatchResults {
+    pub rankings: Vec<LeaderboardEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

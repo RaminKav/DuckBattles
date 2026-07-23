@@ -1,7 +1,5 @@
 //! The screen state for the main gameplay.
 
-use std::process::CommandArgs;
-
 use bevy::{input::common_conditions::input_just_pressed, prelude::*};
 use bevy_renet2::prelude::RenetServer;
 
@@ -10,10 +8,7 @@ use crate::demo::lib::Player;
 use crate::demo::lib::ServerChannel;
 use crate::demo::lib::ServerMessages;
 use crate::demo::physics::Collider;
-use crate::demo::player;
 use crate::demo::player::Coin;
-use crate::theme::widgets::Containers;
-use crate::theme::widgets::Widgets;
 use crate::{
     asset_tracking::LoadResource, audio::Music, demo::level::spawn_level as spawn_level_command,
     screens::Screen,
@@ -23,10 +18,7 @@ pub(super) fn plugin(app: &mut App) {
     // app.add_systems(OnEnter(Screen::Gameplay), spawn_level);
 
     app.load_resource::<GameplayMusic>();
-    app.add_systems(
-        OnEnter(Screen::Lobby),
-        (play_gameplay_music, spawn_score_text),
-    );
+    app.add_systems(OnEnter(Screen::Lobby), play_gameplay_music);
     app.add_systems(OnExit(Screen::Gameplay), stop_music);
     app.add_event::<ScoreEvent>();
     app.add_systems(
@@ -87,20 +79,10 @@ fn return_to_title_screen(mut next_screen: ResMut<NextState<Screen>>) {
 #[derive(Component)]
 pub struct ScoreText;
 
-fn spawn_score_text(mut commands: Commands) {
-    commands
-        .ui_root()
-        .insert(StateScoped(Screen::Gameplay))
-        .with_children(|children| {
-            children.label("Coins: 0").insert(ScoreText).insert(Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(10.0),
-                top: Val::Px(10.0),
-
-                ..default()
-            });
-        });
-}
+/// Visual scale for coin sprites (server + client).
+pub const COIN_SCALE: f32 = 2.75;
+/// Pickup hitbox size for coins (server + client).
+pub const COIN_COLLIDER_SIZE: Vec2 = Vec2::new(48., 56.);
 
 pub fn calculate_score_growth(score: i64) -> f32 {
     score as f32 * 0.1
@@ -135,10 +117,10 @@ pub fn spawn_coin(
         .spawn((
             Name::new("Coin"),
             Coin { claimed_by: None },
-            Transform::from_translation(position).with_scale(Vec3::new(1.5, 1.5, 1.)),
+            Transform::from_translation(position).with_scale(Vec3::new(COIN_SCALE, COIN_SCALE, 1.)),
             StateScoped(Screen::Gameplay),
             Collider {
-                size: Vec2::new(20., 24.),
+                size: COIN_COLLIDER_SIZE,
                 collides_with_player: true,
                 collides_with_projectile: false,
             },

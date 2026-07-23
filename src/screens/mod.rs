@@ -4,6 +4,7 @@ mod credits;
 pub mod gameplay;
 mod loading;
 pub mod lobby;
+pub mod results;
 mod splash;
 mod title;
 
@@ -18,6 +19,7 @@ pub(super) fn plugin(app: &mut App) {
         lobby::plugin,
         gameplay::plugin,
         loading::plugin,
+        results::plugin,
         splash::plugin,
         title::plugin,
     ));
@@ -33,4 +35,6 @@ pub enum Screen {
     Credits,
     Lobby,
     Gameplay,
+    /// Post-match leaderboard before returning to the title screen.
+    Results,
 }

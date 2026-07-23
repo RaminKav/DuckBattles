@@ -57,7 +57,10 @@
         }
       }
     </style>
-  <title>Chexy Butt Balloons</title></head>
+  <title>Duck Battles</title>
+    <!-- Build WASM from repo root Cargo.toml (index lives in bevy_web/). -->
+    <link data-trunk rel="rust" href=".." data-bin="chexy-butt-balloons" data-type="main" data-cargo-no-default-features data-cargo-features="dev" data-wasm-opt="0" />
+  </head>
 
   <body class="center">
     <noscript>JavaScript support is required to run this app</noscript>
@@ -125,21 +128,6 @@
           document.addEventListener(eventName, resumeAllContexts);
         });
       })();
-    </script>
-
-    <script type="module">
-      // Starting the game
-      // The template uses `bevy_app.js`, which will be replaced by the name of the generated JS entrypoint when creating the local web server
-      import init from "./build/chexy-butt-balloons.js";
-      init().catch((error) => {
-        if (
-          !error.message.startsWith(
-            "Using exceptions for control flow, don't mind me. This isn't actually an error!"
-          )
-        ) {
-          throw error;
-        }
-      });
     </script>
 
     <script type="module">

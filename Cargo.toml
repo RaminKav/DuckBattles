@@ -39,10 +39,16 @@ default = [
     "dev_native",
 ]
 
-dev_native = [
-     "bevy/wayland", "bevy/bevy_color", "bevy/bevy_ui", "bevy/webgl2",
+# Shared Bevy features for native + web (no wayland).
+dev = [
+     "bevy/bevy_color", "bevy/bevy_ui", "bevy/webgl2",
      "bevy/bevy_audio", "bevy/bevy_asset", "bevy/bevy_core_pipeline", "bevy/vorbis", "bevy/png",
      "bevy/bevy_render", "bevy/bevy_state", "bevy/bevy_window", "bevy/bevy_winit", "bevy/bevy_text",
+]
+
+dev_native = [
+     "dev",
+     "bevy/wayland",
 ]
 
 
@@ -98,9 +104,6 @@ opt-level = 3
 # Keep debug information in the binary.
 strip = "none"
 
-[build]
-jobs = 1
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 bevy_renet2 = { version = "0.8", features = ["wt_client_transport", "ws_client_transport"] }
@@ -109,6 +112,3 @@ renet2_setup = { version = "0.8", features = ["bevy", "client", "wt_client_trans
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 bevy_renet2 = { version = "0.8", features = ["native_transport", "wt_server_transport", "ws_server_transport"] }
 renet2_setup = { version = "0.8", features = ["bevy", "server", "native_transport", "wt_server_transport", "ws_server_transport"] }
-
-[target.wasm32-unknown-unknown]
-rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
