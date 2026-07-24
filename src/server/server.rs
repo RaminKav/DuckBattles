@@ -471,7 +471,7 @@ impl Plugin for ServerPlugin {
             Update,
             (
                 // Movement before despawn/reset so we never queue inserts on removed players.
-                move_players_system,
+                move_players_system.run_if(in_state(Screen::Gameplay)),
                 server_update_system,
                 tick_match_clock
                     .run_if(in_state(Screen::Gameplay))
@@ -479,8 +479,8 @@ impl Plugin for ServerPlugin {
                 tick_pending_disconnect_all,
                 publish_server_status,
                 server_network_sync,
-                spawn_bot,
-                bot_autocast,
+                spawn_bot.run_if(in_state(Screen::Gameplay)),
+                bot_autocast.run_if(in_state(Screen::Gameplay)),
             )
                 .chain(),
         );
@@ -488,7 +488,8 @@ impl Plugin for ServerPlugin {
             Update,
             (apply_movement, apply_map_bounds)
                 .chain()
-                .in_set(AppSet::Update),
+                .in_set(AppSet::Update)
+                .run_if(in_state(Screen::Gameplay)),
         );
 
         app.add_systems(
@@ -527,7 +528,9 @@ fn server_update_system(
     coins_query: Query<Entity, With<Coin>>,
     projectiles_query: Query<Entity, With<Projectile>>,
     mut next_screen: ResMut<NextState<Screen>>,
+    screen: Res<State<Screen>>,
 ) {
+    let in_match = *screen.get() == Screen::Gameplay;
     for event in server_events.read() {
         println!("TEST: {:?}", event);
         match event {
@@ -620,6 +623,9 @@ fn server_update_system(
             let command: PlayerCommand = bincode::deserialize(&message).unwrap();
             match command {
                 PlayerCommand::BasicAttack { aim } => {
+                    if !in_match {
+                        continue;
+                    }
                     println!("Received basic attack from client {}", client_id);
 
                     if let Some(player_entity) = lobby.players.get(&client_id) {
@@ -672,6 +678,9 @@ fn server_update_system(
                     }
                 }
                 PlayerCommand::Dash => {
+                    if !in_match {
+                        continue;
+                    }
                     if let Some(player_entity) = lobby.players.get(&client_id) {
                         let Ok((_, _, _, movement, facing)) = players.get(*player_entity) else {
                             continue;
@@ -697,6 +706,9 @@ fn server_update_system(
                     }
                 }
                 PlayerCommand::DebugSpawnBot => {
+                    if !in_match {
+                        continue;
+                    }
                     println!("Received debug spawn bot command from client {}", client_id);
                     if let Some(player_entity) = lobby.players.get(&client_id) {
                         if let Ok((_, _, _player_transform, _, _)) = players.get(*player_entity) {
@@ -802,6 +814,10 @@ fn server_update_system(
             }
         }
         while let Some(message) = server.receive_message(client_id, ClientChannel::Input) {
+            // Discard movement input while waiting in the match lobby.
+            if !in_match {
+                continue;
+            }
             let input: PlayerInput = bincode::deserialize(&message).unwrap();
 
             if let Some(player_entity) = lobby.players.get(&client_id) {

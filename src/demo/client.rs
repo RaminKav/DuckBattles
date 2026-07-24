@@ -350,13 +350,18 @@ pub(super) fn plugins(app: &mut App) {
         )
             .run_if(in_state(Screen::Gameplay)),
     );
-    app.add_systems(Update, (debug_player_input));
-    app.add_systems(Update, (player_read_input).run_if(in_state(Screen::Lobby)));
+    app.add_systems(Update, debug_player_input.run_if(in_state(Screen::Gameplay)));
+    app.add_systems(Update, player_read_input.run_if(in_state(Screen::Lobby)));
     app.configure_sets(Update, Connected.run_if(client_connected2));
     app.add_systems(
         Update,
+        client_send_input
+            .in_set(Connected)
+            .run_if(in_state(Screen::Gameplay)),
+    );
+    app.add_systems(
+        Update,
         (
-            client_send_input,
             update_score_text,
             update_match_timer_text,
             client_send_player_commands,
@@ -371,7 +376,7 @@ pub(super) fn plugins(app: &mut App) {
             .run_if(client_just_disconnected)
             .run_if(in_state(Screen::Lobby).or(in_state(Screen::Gameplay))),
     );
-    app.add_systems(OnEnter(Screen::Lobby), setup_client_fr);
+    app.add_systems(OnEnter(Screen::Lobby), (setup_client_fr, clear_local_combat_input));
     app.add_systems(OnEnter(Screen::Gameplay), spawn_match_timer_ui);
     app.add_systems(Update, attach_dash_cooldown_bar.run_if(in_state(Screen::Gameplay)));
 }
@@ -497,6 +502,16 @@ fn player_read_input(
     }
 }
 
+fn clear_local_combat_input(
+    mut player_input: ResMut<PlayerInput>,
+    mut dash_cd: ResMut<LocalDashCooldown>,
+    mut shoot_cd: ResMut<LocalShootCooldown>,
+) {
+    *player_input = PlayerInput::default();
+    *dash_cd = LocalDashCooldown::ready();
+    *shoot_cd = LocalShootCooldown::ready();
+}
+
 fn client_send_input(player_input: Res<PlayerInput>, mut client: ResMut<RenetClient>) {
     let input_message = bincode::serialize(&*player_input).unwrap();
 
@@ -504,10 +519,21 @@ fn client_send_input(player_input: Res<PlayerInput>, mut client: ResMut<RenetCli
 }
 
 fn client_send_player_commands(
+    screen: Res<State<Screen>>,
     mut player_commands: EventReader<PlayerCommand>,
     mut client: ResMut<RenetClient>,
 ) {
+    let in_match = *screen.get() == Screen::Gameplay;
     for command in player_commands.read() {
+        let allowed = match command {
+            PlayerCommand::ToggleReady | PlayerCommand::ResetServer => !in_match,
+            PlayerCommand::BasicAttack { .. }
+            | PlayerCommand::Dash
+            | PlayerCommand::DebugSpawnBot => in_match,
+        };
+        if !allowed {
+            continue;
+        }
         bevy::log::info!("Sending command: {:?}", command);
 
         let command_message = bincode::serialize(command).unwrap();
