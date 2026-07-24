@@ -20,7 +20,9 @@ use bevy_mod_reqwest::*;
 use bevy_renet2::netcode::NetcodeClientPlugin;
 use renet2_netcode::NetcodeClientTransport;
 
-use bevy_renet2::prelude::{client_connected, ClientId, RenetClient, RenetClientPlugin};
+use bevy_renet2::prelude::{
+    client_connected, client_just_disconnected, ClientId, RenetClient, RenetClientPlugin,
+};
 use renet2_setup::{setup_renet2_client, ClientConnectPack, ConnectionType, ServerConnectToken};
 
 use super::lib::{
@@ -334,8 +336,20 @@ pub(super) fn plugins(app: &mut App) {
     app.insert_resource(PlayerInput::default());
     app.insert_resource(NetworkMapping::default());
     app.insert_resource(MatchTimeRemaining(60));
+    app.insert_resource(CursorWorldPos::default());
+    app.insert_resource(LocalDashCooldown::ready());
+    app.insert_resource(LocalShootCooldown::ready());
 
-    app.add_systems(Update, (player_input).run_if(in_state(Screen::Gameplay)));
+    app.add_systems(
+        Update,
+        (
+            update_cursor_world_pos,
+            player_input,
+            update_dash_cooldown_bar,
+            update_hit_flash_text,
+        )
+            .run_if(in_state(Screen::Gameplay)),
+    );
     app.add_systems(Update, (debug_player_input));
     app.add_systems(Update, (player_read_input).run_if(in_state(Screen::Lobby)));
     app.configure_sets(Update, Connected.run_if(client_connected2));
@@ -351,8 +365,15 @@ pub(super) fn plugins(app: &mut App) {
             .in_set(Connected),
     );
     app.add_systems(Update, apply_pending_session_teardown);
+    app.add_systems(
+        Update,
+        return_to_title_on_disconnect
+            .run_if(client_just_disconnected)
+            .run_if(in_state(Screen::Lobby).or(in_state(Screen::Gameplay))),
+    );
     app.add_systems(OnEnter(Screen::Lobby), setup_client_fr);
     app.add_systems(OnEnter(Screen::Gameplay), spawn_match_timer_ui);
+    app.add_systems(Update, attach_dash_cooldown_bar.run_if(in_state(Screen::Gameplay)));
 }
 
 /// Marker for client-side world props synced from the server (walls, trees, etc.).
@@ -365,11 +386,78 @@ pub struct MatchTimeRemaining(pub u16);
 #[derive(Component)]
 struct MatchTimerText;
 
+/// World-space cursor position (Camera2d projection of the mouse).
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct CursorWorldPos(pub Vec2);
+
+const DASH_COOLDOWN_SECS: f32 = 2.5;
+const SHOOT_COOLDOWN_SECS: f32 = 0.25;
+
+#[derive(Resource)]
+struct LocalDashCooldown(Timer);
+
+impl LocalDashCooldown {
+    fn ready() -> Self {
+        let mut timer = Timer::from_seconds(DASH_COOLDOWN_SECS, TimerMode::Once);
+        timer.set_elapsed(timer.duration());
+        Self(timer)
+    }
+}
+
+#[derive(Resource)]
+struct LocalShootCooldown(Timer);
+
+impl LocalShootCooldown {
+    fn ready() -> Self {
+        let mut timer = Timer::from_seconds(SHOOT_COOLDOWN_SECS, TimerMode::Once);
+        timer.set_elapsed(timer.duration());
+        Self(timer)
+    }
+}
+
+#[derive(Component)]
+struct DashCooldownBarRoot;
+
+#[derive(Component)]
+struct DashCooldownBarFill;
+
+#[derive(Component)]
+struct HitFlashText {
+    timer: Timer,
+}
+
+fn update_cursor_world_pos(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    camera_q: Query<(&Camera, &GlobalTransform)>,
+    mut cursor: ResMut<CursorWorldPos>,
+) {
+    let Ok(window) = windows.get_single() else {
+        return;
+    };
+    let Some(screen_pos) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_q.get_single() else {
+        return;
+    };
+    if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, screen_pos) {
+        cursor.0 = world_pos;
+    }
+}
+
 fn player_input(
+    time: Res<Time>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
+    mouse_input: Res<ButtonInput<MouseButton>>,
+    cursor: Res<CursorWorldPos>,
     mut player_input: ResMut<PlayerInput>,
     mut player_commands: EventWriter<PlayerCommand>,
+    mut dash_cd: ResMut<LocalDashCooldown>,
+    mut shoot_cd: ResMut<LocalShootCooldown>,
 ) {
+    dash_cd.0.tick(time.delta());
+    shoot_cd.0.tick(time.delta());
+
     player_input.left =
         keyboard_input.pressed(KeyCode::KeyA) || keyboard_input.pressed(KeyCode::ArrowLeft);
     player_input.right =
@@ -379,8 +467,16 @@ fn player_input(
     player_input.down =
         keyboard_input.pressed(KeyCode::KeyS) || keyboard_input.pressed(KeyCode::ArrowDown);
 
-    if keyboard_input.just_pressed(KeyCode::Space) {
-        player_commands.send(PlayerCommand::BasicAttack);
+    if mouse_input.just_pressed(MouseButton::Left) && shoot_cd.0.finished() {
+        player_commands.send(PlayerCommand::BasicAttack {
+            aim: cursor.0.to_array(),
+        });
+        shoot_cd.0.reset();
+    }
+
+    if keyboard_input.just_pressed(KeyCode::Space) && dash_cd.0.finished() {
+        player_commands.send(PlayerCommand::Dash);
+        dash_cd.0.reset();
     }
 }
 fn debug_player_input(
@@ -430,6 +526,7 @@ pub fn client_sync_players(
     player_assets: Res<PlayerAssets>,
     mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut player_data: Query<&mut Player>,
+    player_transforms: Query<&Transform, With<Player>>,
     mut toggles: EventWriter<ToggleReadyEvent>,
     mut next_screen: ResMut<NextState<Screen>>,
     world_objects: Query<Entity, With<ClientWorldObject>>,
@@ -562,6 +659,7 @@ pub fn client_sync_players(
                     },
                     Transform::from_translation(translation.into())
                         .with_rotation(Quat::from_rotation_z(angle)),
+                    StateScoped(Screen::Gameplay),
                 ));
 
                 network_mapping.0.insert(entity, projectile_entity.id());
@@ -607,6 +705,8 @@ pub fn client_sync_players(
             ServerMessages::StartGame => {
                 bevy::log::info!("Starting game!");
                 match_time.0 = 60;
+                commands.insert_resource(LocalDashCooldown::ready());
+                commands.insert_resource(LocalShootCooldown::ready());
                 next_screen.set(Screen::Gameplay);
             }
             ServerMessages::ReturnToTitle => {
@@ -618,6 +718,7 @@ pub fn client_sync_players(
                     &mut network_mapping,
                     &world_ents,
                 );
+                // Leave gameplay/lobby immediately; teardown drops the socket next frame.
                 next_screen.set(Screen::Title);
                 commands.insert_resource(PendingSessionTeardown);
             }
@@ -636,34 +737,59 @@ pub fn client_sync_players(
                 commands.insert_resource(MatchResults { rankings });
                 next_screen.set(Screen::Results);
             }
+            ServerMessages::PlayerHit { entity } => {
+                let Some(&client_entity) = network_mapping.0.get(&entity) else {
+                    continue;
+                };
+                let Ok(transform) = player_transforms.get(client_entity) else {
+                    continue;
+                };
+                let spawn_at = transform.translation + Vec3::new(0.0, 36.0, 30.0);
+                commands.spawn((
+                    Name::new("Hit Flash"),
+                    Text2d::new("HIT!"),
+                    TextFont::from_font_size(32.0),
+                    TextColor(Color::srgba(1.0, 0.12, 0.12, 1.0)),
+                    TextLayout::new_with_justify(JustifyText::Center),
+                    Transform::from_translation(spawn_at),
+                    HitFlashText {
+                        timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    },
+                    StateScoped(Screen::Gameplay),
+                ));
+            }
         }
     }
 
     while let Some(message) = client.receive_message(ServerChannel::NetworkedEntities) {
         let networked_entities: NetworkedEntities = bincode::deserialize(&message).unwrap();
         for i in 0..networked_entities.entities.len() {
-            if let Some(entity) = network_mapping.0.get(&networked_entities.entities[i]) {
-                let translation = networked_entities.translations[i].into();
-                let maybe_direction = networked_entities.facing_directions[i].map(Vec2::from_array);
-                let mut transform = Transform {
-                    translation,
-                    ..Default::default()
-                };
-                if let Some(direction) = maybe_direction {
-                    commands.entity(*entity).insert(FacingDirection(direction));
+            let Some(&entity) = network_mapping.0.get(&networked_entities.entities[i]) else {
+                continue;
+            };
+            let translation = networked_entities.translations[i].into();
+            let maybe_direction = networked_entities.facing_directions[i].map(Vec2::from_array);
+            let mut transform = Transform {
+                translation,
+                ..Default::default()
+            };
+            if let Some(score) = networked_entities.score[i] {
+                if let Ok(mut player) = player_data.get_mut(entity) {
+                    player.score = score;
+                    transform.scale = Vec3::new(
+                        1.0 + calculate_score_growth(score),
+                        1.0 + calculate_score_growth(score),
+                        1.0,
+                    );
                 }
-                if let Some(score) = networked_entities.score[i] {
-                    if let Ok(mut player) = player_data.get_mut(*entity) {
-                        player.score = score;
-                        transform.scale = Vec3::new(
-                            1.0 + calculate_score_growth(score),
-                            1.0 + calculate_score_growth(score),
-                            1.0,
-                        );
-                    }
-                }
-                commands.entity(*entity).insert(transform);
             }
+            let Some(mut entity_commands) = commands.get_entity(entity) else {
+                continue;
+            };
+            if let Some(direction) = maybe_direction {
+                entity_commands.insert(FacingDirection(direction));
+            }
+            entity_commands.insert(transform);
         }
     }
 }
@@ -678,6 +804,71 @@ fn update_score_text(
         };
 
         text.0 = format!("Coins: {}", player.score);
+    }
+}
+
+fn attach_dash_cooldown_bar(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    players: Query<Entity, (With<ControlledPlayer>, Without<DashCooldownBarRoot>)>,
+) {
+    for player in &players {
+        let bg = commands
+            .spawn((
+                Name::new("Dash CD BG"),
+                Mesh2d(meshes.add(Rectangle::new(36.0, 5.0))),
+                MeshMaterial2d(materials.add(Color::srgba(0.1, 0.1, 0.1, 0.75))),
+                Transform::from_xyz(0.0, 28.0, 2.0),
+            ))
+            .id();
+        let fill = commands
+            .spawn((
+                Name::new("Dash CD Fill"),
+                DashCooldownBarFill,
+                Mesh2d(meshes.add(Rectangle::new(36.0, 5.0))),
+                MeshMaterial2d(materials.add(Color::srgb(0.25, 0.85, 0.45))),
+                Transform::from_xyz(0.0, 28.0, 2.1),
+            ))
+            .id();
+        commands
+            .entity(player)
+            .insert(DashCooldownBarRoot)
+            .add_child(bg)
+            .add_child(fill);
+    }
+}
+
+fn update_dash_cooldown_bar(
+    dash_cd: Res<LocalDashCooldown>,
+    mut fills: Query<&mut Transform, With<DashCooldownBarFill>>,
+) {
+    // Ready = full bar; on cooldown the fill grows back from empty → full.
+    let ready_frac = if dash_cd.0.finished() {
+        1.0
+    } else {
+        dash_cd.0.fraction()
+    };
+    for mut transform in &mut fills {
+        transform.scale.x = ready_frac.clamp(0.05, 1.0);
+        // Keep the bar left-anchored as it shrinks/grows.
+        transform.translation.x = -18.0 * (1.0 - transform.scale.x);
+    }
+}
+
+fn update_hit_flash_text(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut flashes: Query<(Entity, &mut HitFlashText, &mut TextColor, &mut Transform)>,
+) {
+    for (entity, mut flash, mut color, mut transform) in &mut flashes {
+        flash.timer.tick(time.delta());
+        let alpha = 1.0 - flash.timer.fraction();
+        color.0 = Color::srgba(1.0, 0.12, 0.12, alpha);
+        transform.translation.y += 28.0 * time.delta_secs();
+        if flash.timer.finished() {
+            commands.entity(entity).despawn_recursive();
+        }
     }
 }
 
@@ -718,12 +909,31 @@ fn update_match_timer_text(
     remaining: Res<MatchTimeRemaining>,
     mut timer_text: Query<&mut Text, With<MatchTimerText>>,
 ) {
-    if !remaining.is_changed() {
-        return;
-    }
     for mut text in &mut timer_text {
-        text.0 = format!("{}", remaining.0);
+        let next = format!("{}", remaining.0);
+        if text.0 != next {
+            text.0 = next;
+        }
     }
+}
+
+fn return_to_title_on_disconnect(
+    mut commands: Commands,
+    mut lobby: ResMut<ClientLobby>,
+    mut network_mapping: ResMut<NetworkMapping>,
+    world_objects: Query<Entity, With<ClientWorldObject>>,
+    mut next_screen: ResMut<NextState<Screen>>,
+) {
+    bevy::log::info!("Lost server connection — returning to title");
+    let world_ents: Vec<Entity> = world_objects.iter().collect();
+    clear_client_session(
+        &mut commands,
+        &mut lobby,
+        &mut network_mapping,
+        &world_ents,
+    );
+    next_screen.set(Screen::Title);
+    commands.insert_resource(PendingSessionTeardown);
 }
 
 fn clear_client_session(
@@ -732,8 +942,10 @@ fn clear_client_session(
     network_mapping: &mut NetworkMapping,
     world_objects: &[Entity],
 ) {
-    for info in lobby.players.values() {
-        commands.entity(info.client_entity).despawn_recursive();
+    // Despawn every networked entity (players, bullets, coins, etc.).
+    let mapped: Vec<Entity> = network_mapping.0.values().copied().collect();
+    for entity in mapped {
+        commands.entity(entity).despawn_recursive();
     }
     lobby.players.clear();
     network_mapping.0.clear();
@@ -745,11 +957,16 @@ fn clear_client_session(
 fn apply_pending_session_teardown(
     mut commands: Commands,
     pending: Option<Res<PendingSessionTeardown>>,
+    transport: Option<ResMut<NetcodeClientTransport>>,
 ) {
     if pending.is_none() {
         return;
     }
     commands.remove_resource::<PendingSessionTeardown>();
+    // Disconnect before dropping resources so the server sees a clean leave.
+    if let Some(mut transport) = transport {
+        transport.disconnect();
+    }
     commands.remove_resource::<RenetClient>();
     commands.remove_resource::<NetcodeClientTransport>();
     commands.remove_resource::<CurrentClientId>();

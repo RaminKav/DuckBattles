@@ -100,7 +100,12 @@ pub struct PlayerInput {
 
 #[derive(Debug, Serialize, Deserialize, Event)]
 pub enum PlayerCommand {
-    BasicAttack,
+    /// Fire toward a world-space aim point (from the client's cursor).
+    BasicAttack {
+        aim: [f32; 2],
+    },
+    /// Short burst dash in the player's current move/facing direction.
+    Dash,
     ToggleReady,
     DebugSpawnBot,
     /// Ask the server to reset the match and disconnect everyone to the title screen.
@@ -160,6 +165,10 @@ pub enum ServerMessages {
     /// Match over — show leaderboard then return to menu.
     MatchEnded {
         rankings: Vec<LeaderboardEntry>,
+    },
+    /// A player was hit by a projectile (for client VFX / "HIT!" text).
+    PlayerHit {
+        entity: Entity,
     },
 }
 

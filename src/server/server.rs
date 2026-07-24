@@ -7,7 +7,7 @@ use crate::{
             PlayerCommand, PlayerInput, PublicServerStatus, ServerChannel, ServerMessages,
             ServerPhase, Velocity, MAX_PLAYERS, PLAYER_COLOR_COUNT, PROTOCOL_ID,
         },
-        movement::{apply_movement, apply_screen_wrap, MovementController},
+        movement::{apply_map_bounds, apply_movement, MovementController},
         physics::{check_collision, Collider},
         player::{Coin, PlayerAssets},
     },
@@ -63,8 +63,12 @@ pub struct CoinSpawner {
 const PLAYER_MOVE_SPEED: f32 = 300.0;
 const PROJECTILE_MOVE_SPEED: f32 = 500.0;
 const MATCH_DURATION_SECS: f32 = 60.0;
+const DASH_DURATION_SECS: f32 = 0.16;
+const DASH_COOLDOWN_SECS: f32 = 2.5;
+/// Strong short burst — total distance ≈ base_speed * mult * duration.
+const DASH_SPEED_MULT: f32 = 4.0;
 /// Delay so ReturnToTitle / MatchEnded reach clients before sockets close.
-const DISCONNECT_DELAY_SECS: f32 = 0.35;
+const DISCONNECT_DELAY_SECS: f32 = 0.75;
 const SPAWN_POSITIONS: [Vec2; 8] = [
     Vec2::new(-250., 0.),
     Vec2::new(250., 0.),
@@ -111,6 +115,27 @@ pub struct Projectile {
     pub speed: f32,
     pub direction: Vec2,
     pub owner: Entity,
+}
+
+#[derive(Component, Debug)]
+struct DashState {
+    cooldown: Timer,
+    active: Timer,
+    direction: Vec2,
+}
+
+impl Default for DashState {
+    fn default() -> Self {
+        let mut cooldown = Timer::from_seconds(DASH_COOLDOWN_SECS, TimerMode::Once);
+        cooldown.set_elapsed(cooldown.duration());
+        let mut active = Timer::from_seconds(DASH_DURATION_SECS, TimerMode::Once);
+        active.set_elapsed(active.duration());
+        Self {
+            cooldown,
+            active,
+            direction: Vec2::Y,
+        }
+    }
 }
 
 // // #[cfg(feature = "netcode")]
@@ -445,6 +470,8 @@ impl Plugin for ServerPlugin {
         app.add_systems(
             Update,
             (
+                // Movement before despawn/reset so we never queue inserts on removed players.
+                move_players_system,
                 server_update_system,
                 tick_match_clock
                     .run_if(in_state(Screen::Gameplay))
@@ -452,14 +479,14 @@ impl Plugin for ServerPlugin {
                 tick_pending_disconnect_all,
                 publish_server_status,
                 server_network_sync,
-                move_players_system,
                 spawn_bot,
                 bot_autocast,
-            ),
+            )
+                .chain(),
         );
         app.add_systems(
             Update,
-            (apply_movement, apply_screen_wrap)
+            (apply_movement, apply_map_bounds)
                 .chain()
                 .in_set(AppSet::Update),
         );
@@ -488,7 +515,14 @@ fn server_update_system(
     mut commands: Commands,
     mut lobby: ResMut<ServerLobby>,
     mut server: ResMut<RenetServer>,
-    mut players: Query<(Entity, &mut Player, &Transform, &MovementController)>,
+    mut players: Query<(
+        Entity,
+        &mut Player,
+        &Transform,
+        &MovementController,
+        &FacingDirection,
+    )>,
+    mut dash_states: Query<&mut DashState>,
     game_objects: Query<(Entity, &Transform, &ServerGameObject)>,
     coins_query: Query<Entity, With<Coin>>,
     projectiles_query: Query<Entity, With<Projectile>>,
@@ -501,7 +535,7 @@ fn server_update_system(
                 println!("Player {} connected.", client_id);
 
                 // Initialize other players for this new client
-                for (entity, player, transform, _) in players.iter() {
+                for (entity, player, transform, _, _) in players.iter() {
                     let translation: [f32; 3] = transform.translation.into();
                     let message = bincode::serialize(&ServerMessages::PlayerCreate {
                         id: player.id,
@@ -544,6 +578,8 @@ fn server_update_system(
                     })
                     .insert(PlayerInput::default())
                     .insert(Velocity::default())
+                    .insert(FacingDirection(Vec2::Y))
+                    .insert(DashState::default())
                     .insert(Player {
                         id: *client_id,
                         score: 0,
@@ -583,14 +619,19 @@ fn server_update_system(
         while let Some(message) = server.receive_message(client_id, ClientChannel::Command) {
             let command: PlayerCommand = bincode::deserialize(&message).unwrap();
             match command {
-                PlayerCommand::BasicAttack => {
+                PlayerCommand::BasicAttack { aim } => {
                     println!("Received basic attack from client {}", client_id);
 
                     if let Some(player_entity) = lobby.players.get(&client_id) {
-                        if let Ok((_, _, player_transform, player_movement)) =
+                        if let Ok((_, _, player_transform, _, facing)) =
                             players.get(*player_entity)
                         {
-                            let player_dir = player_movement.intent;
+                            let aim = Vec2::from_array(aim);
+                            let mut player_dir =
+                                (aim - player_transform.translation.xy()).normalize_or_zero();
+                            if player_dir == Vec2::ZERO {
+                                player_dir = facing.0.normalize_or_zero();
+                            }
                             if player_dir == Vec2::ZERO {
                                 continue;
                             }
@@ -630,23 +671,57 @@ fn server_update_system(
                         }
                     }
                 }
+                PlayerCommand::Dash => {
+                    if let Some(player_entity) = lobby.players.get(&client_id) {
+                        let Ok((_, _, _, movement, facing)) = players.get(*player_entity) else {
+                            continue;
+                        };
+                        let Ok(mut dash) = dash_states.get_mut(*player_entity) else {
+                            continue;
+                        };
+                        if !dash.cooldown.finished() {
+                            continue;
+                        }
+                        let dir = if movement.intent != Vec2::ZERO {
+                            movement.intent
+                        } else {
+                            facing.0.normalize_or_zero()
+                        };
+                        if dir == Vec2::ZERO {
+                            continue;
+                        }
+                        dash.direction = dir;
+                        dash.active.reset();
+                        dash.cooldown.reset();
+                        println!("Player {client_id} dashed toward {dir:?}");
+                    }
+                }
                 PlayerCommand::DebugSpawnBot => {
                     println!("Received debug spawn bot command from client {}", client_id);
                     if let Some(player_entity) = lobby.players.get(&client_id) {
-                        if let Ok((_, _, player_transform, _)) = players.get(*player_entity) {
+                        if let Ok((_, _, _player_transform, _, _)) = players.get(*player_entity) {
                             let color = (lobby.players.len() % PLAYER_COLOR_COUNT) as u8;
                             let transform = Transform::from_translation(
                                 SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()]
                                     .extend(8.),
                             );
                             let player_entity = commands
-                                .spawn((transform,))
-                                .insert(Player {
-                                    id: client_id,
-                                    score: 0,
-                                    is_ready: true,
-                                    color,
-                                })
+                                .spawn((
+                                    transform,
+                                    MovementController {
+                                        max_speed: PLAYER_MOVE_SPEED,
+                                        ..default()
+                                    },
+                                    PlayerInput::default(),
+                                    FacingDirection(Vec2::Y),
+                                    DashState::default(),
+                                    Player {
+                                        id: client_id,
+                                        score: 0,
+                                        is_ready: true,
+                                        color,
+                                    },
+                                ))
                                 .id();
                             let current_time = SystemTime::now()
                                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -672,7 +747,7 @@ fn server_update_system(
                     if let Some(player_entity) = lobby.players.get_mut(&client_id) {
                         println!("     -> Got player Entity: {player_entity:?}");
                         println!("     -> count: {:?}", players.is_empty());
-                        if let Ok((_, mut player, _, _)) = players.get_mut(*player_entity) {
+                        if let Ok((_, mut player, _, _, _)) = players.get_mut(*player_entity) {
                             println!("          -> Got player Details");
                             player.is_ready = !player.is_ready;
                             println!("Player {} is now {:?}", client_id, player.is_ready);
@@ -690,7 +765,7 @@ fn server_update_system(
 
                     let mut all_players_ready_check = true;
                     for (_, player) in lobby.players.iter() {
-                        if let Ok((_, player, _, _)) = players.get(*player) {
+                        if let Ok((_, player, _, _, _)) = players.get(*player) {
                             if !player.is_ready {
                                 all_players_ready_check = false;
                                 break;
@@ -711,10 +786,12 @@ fn server_update_system(
                     let message = bincode::serialize(&ServerMessages::ReturnToTitle).unwrap();
                     server.broadcast_message(ServerChannel::ServerMessages, message);
 
+                    let player_ents: Vec<Entity> =
+                        players.iter().map(|(entity, _, _, _, _)| entity).collect();
                     reset_server_world(
                         &mut commands,
                         &mut lobby,
-                        &players,
+                        player_ents,
                         &coins_query,
                         &projectiles_query,
                         &game_objects,
@@ -728,8 +805,10 @@ fn server_update_system(
             let input: PlayerInput = bincode::deserialize(&message).unwrap();
 
             if let Some(player_entity) = lobby.players.get(&client_id) {
-                // println!("INPUT! {:?}", input);
-                commands.entity(*player_entity).insert(input);
+                // Avoid Bevy B0003 if this player was just queued for despawn.
+                if let Some(mut entity_commands) = commands.get_entity(*player_entity) {
+                    entity_commands.insert(input);
+                }
             }
         }
     }
@@ -780,17 +859,33 @@ fn server_network_sync(
 }
 
 fn move_players_system(
-    mut commands: Commands,
-    mut query: Query<(Entity, &mut MovementController, &PlayerInput)>,
+    time: Res<Time>,
+    mut query: Query<(
+        &mut MovementController,
+        &PlayerInput,
+        &mut FacingDirection,
+        &mut DashState,
+    )>,
 ) {
-    for (e, mut controller, input) in query.iter_mut() {
+    for (mut controller, input, mut facing, mut dash) in query.iter_mut() {
+        dash.cooldown.tick(time.delta());
+
+        if !dash.active.finished() {
+            dash.active.tick(time.delta());
+            controller.intent = dash.direction;
+            controller.speed_multiplier = DASH_SPEED_MULT;
+            facing.0 = dash.direction;
+            continue;
+        }
+
+        controller.speed_multiplier = 1.0;
         let x = (input.right as i8 - input.left as i8) as f32;
         let y = (input.up as i8 - input.down as i8) as f32;
         let direction = Vec2::new(x, y).normalize_or_zero();
-        // velocity.0.x = direction.x * PLAYER_MOVE_SPEED;
-        // velocity.0.z = direction.y * PLAYER_MOVE_SPEED;
         controller.intent = direction;
-        commands.entity(e).insert(FacingDirection(direction));
+        if direction != Vec2::ZERO {
+            facing.0 = direction;
+        }
     }
 }
 
@@ -823,6 +918,12 @@ fn move_projectiles(
                         player: collider_entity,
                         delta: -penalty,
                     });
+                    let hit_msg =
+                        bincode::serialize(&ServerMessages::PlayerHit {
+                            entity: collider_entity,
+                        })
+                        .unwrap();
+                    server.broadcast_message(ServerChannel::ServerMessages, hit_msg);
                     for _ in 0..penalty {
                         let mut rng = rand::thread_rng();
                         let player_pos = collider_transform.translation;
@@ -890,16 +991,25 @@ fn spawn_bot(
             SPAWN_POSITIONS[lobby.players.len() % SPAWN_POSITIONS.len()].extend(8.),
         );
         let player_entity = commands
-            .spawn((transform,))
-            .insert(Player {
-                id: client_id,
-                score: 0,
-                is_ready: true,
-                color,
-            })
-            .insert(Bot {
-                auto_cast: Timer::from_seconds(1.0, TimerMode::Repeating),
-            })
+            .spawn((
+                transform,
+                MovementController {
+                    max_speed: PLAYER_MOVE_SPEED,
+                    ..default()
+                },
+                PlayerInput::default(),
+                FacingDirection(Vec2::Y),
+                DashState::default(),
+                Player {
+                    id: client_id,
+                    score: 0,
+                    is_ready: true,
+                    color,
+                },
+                Bot {
+                    auto_cast: Timer::from_seconds(1.0, TimerMode::Repeating),
+                },
+            ))
             .id();
 
         lobby.players.insert(client_id, player_entity);
@@ -987,13 +1097,13 @@ fn schedule_disconnect_all(commands: &mut Commands) {
 fn reset_server_world(
     commands: &mut Commands,
     lobby: &mut ServerLobby,
-    players: &Query<(Entity, &mut Player, &Transform, &MovementController)>,
+    player_entities: impl IntoIterator<Item = Entity>,
     coins_query: &Query<Entity, With<Coin>>,
     projectiles_query: &Query<Entity, With<Projectile>>,
     game_objects: &Query<(Entity, &Transform, &ServerGameObject)>,
     next_screen: &mut NextState<Screen>,
 ) {
-    for entity in players.iter().map(|(entity, _, _, _)| entity).collect::<Vec<_>>() {
+    for entity in player_entities {
         commands.entity(entity).despawn_recursive();
     }
     for entity in coins_query.iter().collect::<Vec<_>>() {
@@ -1019,14 +1129,24 @@ fn tick_match_clock(
     mut clock: ResMut<MatchClock>,
     mut server: ResMut<RenetServer>,
     mut lobby: ResMut<ServerLobby>,
-    players: Query<(Entity, &mut Player, &Transform, &MovementController)>,
+    players: Query<(Entity, &Player)>,
     coins_query: Query<Entity, With<Coin>>,
     projectiles_query: Query<Entity, With<Projectile>>,
     game_objects: Query<(Entity, &Transform, &ServerGameObject)>,
     mut next_screen: ResMut<NextState<Screen>>,
 ) {
+    if clock.remaining <= 0.0 {
+        // Already ended this match; wait for resource removal.
+        return;
+    }
+
     clock.remaining = (clock.remaining - time.delta_secs()).max(0.0);
-    let secs_left = clock.remaining.ceil() as u16;
+    // Display whole seconds remaining; show 0 for the final partial second.
+    let secs_left = if clock.remaining <= 0.0 {
+        0
+    } else {
+        clock.remaining.ceil() as u16
+    };
 
     if secs_left != clock.last_broadcast_secs {
         clock.last_broadcast_secs = secs_left;
@@ -1035,6 +1155,7 @@ fn tick_match_clock(
         })
         .unwrap();
         server.broadcast_message(ServerChannel::ServerMessages, message);
+        println!("Match timer: {secs_left}s");
     }
 
     if clock.remaining > 0.0 {
@@ -1043,7 +1164,7 @@ fn tick_match_clock(
 
     let mut rankings: Vec<LeaderboardEntry> = players
         .iter()
-        .map(|(_, player, _, _)| LeaderboardEntry {
+        .map(|(_, player)| LeaderboardEntry {
             client_id: player.id,
             score: player.score,
             color: player.color,
@@ -1055,10 +1176,13 @@ fn tick_match_clock(
     let message = bincode::serialize(&ServerMessages::MatchEnded { rankings }).unwrap();
     server.broadcast_message(ServerChannel::ServerMessages, message);
 
+    // Keep MatchClock at 0 so we don't re-enter end logic before remove applies.
+    clock.remaining = 0.0;
+    let player_ents: Vec<Entity> = players.iter().map(|(entity, _)| entity).collect();
     reset_server_world(
         &mut commands,
         &mut lobby,
-        &players,
+        player_ents,
         &coins_query,
         &projectiles_query,
         &game_objects,

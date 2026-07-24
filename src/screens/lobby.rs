@@ -78,7 +78,7 @@ fn spawn_lobby_ui(mut commands: Commands, existing: Query<Entity, With<SessionHu
                     Name::new("Coins Label"),
                     Text::new("Coins: 0"),
                     TextFont::from_font_size(24.0),
-                    TextColor(LABEL_TEXT),
+                    TextColor(LOBBY_TEXT),
                     ScoreText,
                 ));
 
@@ -134,7 +134,7 @@ fn spawn_lobby_ui(mut commands: Commands, existing: Query<Entity, With<SessionHu
                 LobbyDetailsText,
                 Text::new("Lobby\nConnecting…"),
                 TextFont::from_font_size(22.0),
-                TextColor(LABEL_TEXT),
+                TextColor(LOBBY_TEXT),
                 TextLayout::new_with_justify(JustifyText::Center),
                 Node {
                     width: Val::Px(480.0),

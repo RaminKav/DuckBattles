@@ -13,7 +13,7 @@
 //! purposes. If you want to move the player in a smoother way,
 //! consider using a [fixed timestep](https://github.com/bevyengine/bevy/blob/main/examples/movement/physics_in_fixed_timestep.rs).
 
-use bevy::{prelude::*, window::PrimaryWindow};
+use bevy::prelude::*;
 
 use crate::{
     screens::{gameplay::ScoreEvent, Screen},
@@ -26,11 +26,16 @@ use super::{
     player::Coin,
 };
 
+/// Map sprite is 1024×800 at scale 1.5 → playable world half-extents.
+pub const MAP_WORLD_HALF: Vec2 = Vec2::new(768.0, 600.0);
+/// Keep player bodies slightly inside the map edge.
+pub const PLAYER_BOUNDS_MARGIN: f32 = 28.0;
+
 pub fn plugin(app: &mut App) {
-    app.register_type::<(MovementController, ScreenWrap)>();
+    app.register_type::<MovementController>();
     app.add_systems(
         Update,
-        (apply_movement, apply_screen_wrap)
+        (apply_movement, apply_map_bounds)
             .chain()
             .in_set(AppSet::Update)
             .run_if(in_state(Screen::Gameplay)),
@@ -50,6 +55,9 @@ pub struct MovementController {
     /// 1 world unit = 1 pixel when using the default 2D camera and no physics
     /// engine.
     pub max_speed: f32,
+
+    /// Temporary multiplier (e.g. dash burst).
+    pub speed_multiplier: f32,
 }
 
 impl Default for MovementController {
@@ -58,6 +66,7 @@ impl Default for MovementController {
             intent: Vec2::ZERO,
             // 400 pixels per second is a nice default, but we can still vary this per character.
             max_speed: 400.0,
+            speed_multiplier: 1.0,
         }
     }
 }
@@ -71,7 +80,8 @@ pub fn apply_movement(
 ) {
     let mut movement_data: Vec<_> = vec![];
     for (entity, controller) in &mut movement_query {
-        let velocity = controller.max_speed * controller.intent;
+        let velocity =
+            controller.max_speed * controller.speed_multiplier * controller.intent;
         let movement_this_frame = velocity.extend(0.0) * time.delta_secs();
         let (_, t, c, _) = colliders.get(entity).unwrap();
         movement_data.push((entity, t.clone(), c.clone(), movement_this_frame));
@@ -147,22 +157,13 @@ pub fn apply_movement(
     // }
 }
 
-#[derive(Component, Reflect)]
-#[reflect(Component)]
-pub struct ScreenWrap;
-
-pub fn apply_screen_wrap(
-    window_query: Query<&Window, With<PrimaryWindow>>,
-    mut wrap_query: Query<&mut Transform, With<ScreenWrap>>,
-) {
-    let Ok(window) = window_query.get_single() else {
-        return;
-    };
-    let size = window.size() + 256.0;
-    let half_size = size / 2.0;
-    for mut transform in &mut wrap_query {
-        let position = transform.translation.xy();
-        let wrapped = (position + half_size).rem_euclid(size) - half_size;
-        transform.translation = wrapped.extend(transform.translation.z);
+/// Clamp players to the map's world bounds (shared constant — not window size).
+/// Reliable across screen sizes because the game world is fixed; the camera just
+/// shows more/less of that same map.
+pub fn apply_map_bounds(mut query: Query<&mut Transform, With<Player>>) {
+    let half = MAP_WORLD_HALF - Vec2::splat(PLAYER_BOUNDS_MARGIN);
+    for mut transform in &mut query {
+        transform.translation.x = transform.translation.x.clamp(-half.x, half.x);
+        transform.translation.y = transform.translation.y.clamp(-half.y, half.y);
     }
 }

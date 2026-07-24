@@ -47,7 +47,7 @@ fn spawn_title_screen(mut commands: Commands, mut poll: ResMut<ServerStatusPoll>
                 ServerStatusText,
                 Text::new("Checking server…"),
                 TextFont::from_font_size(22.0),
-                TextColor(ui_palette::LABEL_TEXT),
+                TextColor(ui_palette::LOBBY_TEXT),
                 TextLayout::new_with_justify(JustifyText::Center),
             ));
 

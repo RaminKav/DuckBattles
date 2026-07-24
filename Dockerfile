@@ -18,8 +18,12 @@ WORKDIR /usr/src/app
 # Copy the rest of your source code to the container
 COPY . .
 
-# Build your project
-RUN cargo build --release --features server
+# Build with persistent cargo caches so redeploys don't recompile the world.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/usr/src/app/target \
+    cargo build --release --features server \
+    && cp target/release/chexy-butt-balloons /usr/src/app/chexy-butt-balloons
 
 # Now we’ll build the runtime image
 FROM debian:bookworm-slim
@@ -42,7 +46,7 @@ ENV WGPU_FORCE_HEADLESS=1
 WORKDIR /usr/local/bin
 
 # Copy the built server from the builder container
-COPY --from=builder /usr/src/app/target/release/chexy-butt-balloons /usr/local/bin/chexy-butt-balloons
+COPY --from=builder /usr/src/app/chexy-butt-balloons /usr/local/bin/chexy-butt-balloons
 
 # Optionally copy static data if the server needs it at runtime
 COPY --from=builder /usr/src/app/assets /usr/local/share/chexy-butt-balloons/assets
